@@ -4306,6 +4306,20 @@ const STRINGS = {
     chargeCount: "{n} trạm trong khung Hà Nội, {v} của VinFast.",
     chargeWarn: "OpenStreetMap do cộng đồng đóng góp nên có thể thiếu hoặc cũ, và hầu như không ghi trạm nào nhận xe máy điện. Nên gọi trước khi đi xa.",
     srcSee: "Xem văn bản gốc",
+    wardName: "Phường xã mới",
+    wardOn: "Hiện ranh giới 126 phường xã Hà Nội sau sáp nhập",
+    wardTitle: "Phường xã sau sáp nhập",
+    wardWhen: "Hiệu lực từ 01/7/2025",
+    wardCount: "Hà Nội còn 126 đơn vị cấp xã: 51 phường và 75 xã.",
+    wardHow: "Chạm vào bất kỳ chỗ nào trên bản đồ để biết chỗ đó nay thuộc phường xã nào. Hoặc bấm Gần tôi để tra chỗ bạn đang đứng.",
+    wardWarn: "Ranh giới vẽ theo OpenStreetMap và đã rút gọn, sai số cỡ vài chục mét. Đứng sát mép thì đừng tin ngay — hỏi lại UBND phường cho chắc.",
+    wardTap: "Chạm vào bản đồ để tra phường",
+    wardAt: "Chỗ này thuộc",
+    wardNone: "Chỗ này nằm ngoài địa giới Hà Nội",
+    wardEdge: "Sát ranh giới (cách {d}) — nên kiểm tra lại",
+    wardLoading: "Đang tải ranh giới 126 phường xã…",
+    wardFail: "Chưa tải được dữ liệu phường xã. Thử lại khi mạng ổn hơn.",
+    wardOf: "Phường xã",
   },
   en: {
     title: "Hanoi Atlas — a 3D map of food, sights & homes",
@@ -4419,6 +4433,20 @@ const STRINGS = {
     chargeCount: "{n} points inside the Hanoi frame, {v} of them VinFast.",
     chargeWarn: "OpenStreetMap is community-mapped, so it can be incomplete or stale, and almost none of these record whether they take electric motorbikes. Call ahead before a long trip.",
     srcSee: "Read the document",
+    wardName: "New wards",
+    wardOn: "Show the 126 wards and communes of Hanoi after the 2025 merger",
+    wardTitle: "Wards after the merger",
+    wardWhen: "In force since 1 July 2025",
+    wardCount: "Hanoi now has 126 commune-level units: 51 wards and 75 communes.",
+    wardHow: "Tap anywhere on the map to see which ward or commune it now belongs to. Or press Near me to look up where you are standing.",
+    wardWarn: "Boundaries come from OpenStreetMap and are simplified, so they are accurate to a few tens of metres. Close to an edge, check with the ward office rather than trusting this.",
+    wardTap: "Tap the map to look up a ward",
+    wardAt: "This spot is in",
+    wardNone: "This spot is outside Hanoi",
+    wardEdge: "Close to a boundary ({d} away) — worth double-checking",
+    wardLoading: "Loading the 126 ward boundaries…",
+    wardFail: "Could not load the ward data. Try again on a better connection.",
+    wardOf: "Ward",
   },
 };
 
@@ -4794,6 +4822,7 @@ function locateMe() {
       button?.classList.add("is-on");
 
       syncMapHere();
+      if (mapLayerState.ward) tellWardAt(userPos);
       const onMap = insideHanoi(userPos);
       if (onMap && hereGroup) {
         hereGroup.position.copy(project(userPos.lat, userPos.lng, 0));
@@ -5219,7 +5248,13 @@ async function loadMap() {
     map.on("error", (event) => {
       mapLastError = String(event?.error?.message || event?.error || event || "").slice(0, 240);
     });
-    map.on("click", () => clearSelection());
+    map.on("click", (event) => {
+      if (mapLayerState.ward) {
+        tellWardAt({ lat: event.lngLat.lat, lng: event.lngLat.lng });
+        return;
+      }
+      clearSelection();
+    });
     map.on("zoom", syncMapZoom);
     // Style có thể nạp lại (đổi nền, mất mạng rồi vào lại) — mỗi lần xong thì
     // đặt lại ngôn ngữ nhãn cho khớp nút VI | EN.
@@ -5837,7 +5872,7 @@ function lezWardOf(item) {
 
 /* ---------- Bật tắt lớp trên nền MapLibre ---------- */
 
-const mapLayerState = { lez: false, charge: false };
+const mapLayerState = { lez: false, charge: false, ward: false };
 
 function lezGeoJson() {
   return {
@@ -5931,6 +5966,7 @@ function syncMapLayers() {
   show("lez-fill", mapLayerState.lez);
   show("lez-line", mapLayerState.lez);
   show("charge-dot", mapLayerState.charge);
+  syncWardLayer();
 }
 
 async function toggleMapLayer(key) {
@@ -5962,6 +5998,7 @@ function renderMapLayerChips() {
   const items = [
     { key: "lez", name: t("lezName"), title: t("lezOn"), tone: "lez" },
     { key: "charge", name: t("chargeName"), title: t("chargeOn", { n: chargePoints().length }), tone: "charge" },
+    { key: "ward", name: t("wardName"), title: t("wardOn"), tone: "ward" },
   ];
   strip.innerHTML = items
     .map(
@@ -5971,7 +6008,9 @@ function renderMapLayerChips() {
     )
     .join("");
   strip.querySelectorAll("[data-layer]").forEach((button) => {
-    button.addEventListener("click", () => toggleMapLayer(button.dataset.layer));
+    button.addEventListener("click", () =>
+      button.dataset.layer === "ward" ? toggleWardLayer() : toggleMapLayer(button.dataset.layer),
+    );
   });
 }
 
@@ -5983,7 +6022,7 @@ function sourceLinkHtml(id) {
 
 function renderMapNote() {
   let note = document.querySelector("#mapNote");
-  const on = mapMode && (mapLayerState.lez || mapLayerState.charge);
+  const on = mapMode && (mapLayerState.lez || mapLayerState.charge || mapLayerState.ward);
   if (!on) {
     note?.remove();
     return;
@@ -6008,6 +6047,21 @@ function renderMapNote() {
         <p class="map-note__srcs">${escapeHtml(t("srcSee"))}: ${sourceLinkHtml("nq-57-2025")} ${sourceLinkHtml("ct-20-2025")}</p>
       </article>`);
   }
+  if (mapLayerState.ward) {
+    const picked = wardPick
+      ? `<p class="map-note__pick"><b>${escapeHtml(t("wardAt"))}:</b> ${escapeHtml(wardLabel(wardPick))}</p>`
+      : `<p class="map-note__next">${escapeHtml(t("wardTap"))}</p>`;
+    blocks.push(`
+      <article class="map-note__block">
+        <h3>${escapeHtml(t("wardTitle"))}</h3>
+        <p class="map-note__when">${escapeHtml(t("wardWhen"))}</p>
+        ${picked}
+        <p>${escapeHtml(t("wardCount"))}</p>
+        <p>${escapeHtml(t("wardHow"))}</p>
+        <p class="map-note__warn">${escapeHtml(t("wardWarn"))}</p>
+        <p class="map-note__srcs">${escapeHtml(t("srcSee"))}: ${sourceLinkHtml("nq-1656-2025")} ${sourceLinkHtml("osm")}</p>
+      </article>`);
+  }
   if (mapLayerState.charge) {
     const points = chargePoints();
     blocks.push(`
@@ -6030,10 +6084,198 @@ function openLezNote() {
 function bootMapLayers() {
   registerLayer("lez", ["nq-57-2025", "ct-20-2025", "luat-thu-do-2024", "osm"]);
   registerLayer("charge", ["osm"]);
+  registerLayer("ward", ["nq-1656-2025", "osm"]);
   renderMapLayerChips();
   const asked = (QUERY.get("lop") || "").toLowerCase().split(",").filter(Boolean);
   if (asked.includes("lez") || asked.includes("phatthai")) toggleMapLayer("lez");
   if (asked.includes("sac") || asked.includes("charge")) toggleMapLayer("charge");
+  if (asked.includes("phuong") || asked.includes("ward")) toggleWardLayer();
+}
+
+/* ==========================================================================
+   TRA PHƯỜNG XÃ SAU SÁP NHẬP · WARD LOOKUP
+   Từ 01/7/2025 Hà Nội còn 126 đơn vị cấp xã (Nghị quyết 1656/NQ-UBTVQH15).
+   Rất nhiều người vẫn chưa rõ nhà mình nay thuộc phường nào — cần cho giấy
+   tờ, khai báo, ghi địa chỉ. Chạm vào bản đồ là ra.
+   Ranh giới nằm ở public/data/phuong-xa.txt, chỉ tải khi bật lớp này, nên ai
+   không dùng thì không phải tải 60 KB vô ích.
+   ========================================================================== */
+
+const WARD_URL = "/data/phuong-xa.txt";
+let wardData = null;
+let wardLoading = null;
+
+async function loadWards() {
+  if (wardData) return wardData;
+  if (wardLoading) return wardLoading;
+  wardLoading = (async () => {
+    const response = await fetch(WARD_URL);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const text = await response.text();
+    wardData = text.trim().split("\n").map((line) => {
+      const [name, kind, pop, ring] = line.split("|");
+      let lat = 0;
+      let lng = 0;
+      return {
+        name,
+        kind,
+        pop: Number(pop) || 0,
+        ring: ring.split(" ").map((token) => {
+          const [dLat, dLng] = token.split(",").map(Number);
+          lat += dLat;
+          lng += dLng;
+          return [lat / 1e4, lng / 1e4];
+        }),
+      };
+    });
+    return wardData;
+  })();
+  try {
+    return await wardLoading;
+  } catch (error) {
+    wardLoading = null;
+    throw error;
+  }
+}
+
+function wardLabel(ward) {
+  if (!ward) return "";
+  const prefix = ward.kind === "p" ? "Phường" : ward.kind === "x" ? "Xã" : "";
+  return prefix ? `${prefix} ${ward.name}` : ward.name;
+}
+
+// Khoảng cách ngắn nhất từ điểm tới cạnh gần nhất của vòng, tính bằng mét.
+function metresToRing(pos, ring) {
+  let best = Infinity;
+  for (let i = 0; i < ring.length - 1; i += 1) {
+    const [aLat, aLng] = ring[i];
+    const [bLat, bLng] = ring[i + 1];
+    const scale = Math.cos(pos.lat * (Math.PI / 180));
+    const ax = (aLng - pos.lng) * scale;
+    const ay = aLat - pos.lat;
+    const bx = (bLng - pos.lng) * scale;
+    const by = bLat - pos.lat;
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    let t = len2 === 0 ? 0 : -(ax * dx + ay * dy) / len2;
+    t = Math.max(0, Math.min(1, t));
+    best = Math.min(best, Math.hypot(ax + t * dx, ay + t * dy));
+  }
+  return best * (Math.PI / 180) * 6371000;
+}
+
+function wardAt(pos) {
+  if (!wardData || !pos) return null;
+  const hit = wardData.find((w) => insideRing(pos, w.ring));
+  if (!hit) return null;
+  return { ward: hit, edge: metresToRing(pos, hit.ring) };
+}
+
+/* ---------- Lớp ranh giới trên nền bản đồ ---------- */
+
+function wardGeoJson() {
+  return {
+    type: "FeatureCollection",
+    features: (wardData || []).map((w) => ({
+      type: "Feature",
+      properties: { ten: wardLabel(w) },
+      geometry: { type: "Polygon", coordinates: [w.ring.map(([lat, lng]) => [lng, lat])] },
+    })),
+  };
+}
+
+function ensureWardLayer() {
+  if (!mapObj || !wardData || !mapObj.isStyleLoaded()) return false;
+  if (mapObj.getSource("ward")) return true;
+  mapObj.addSource("ward", { type: "geojson", data: wardGeoJson() });
+  mapObj.addLayer({
+    id: "ward-line",
+    type: "line",
+    source: "ward",
+    layout: { visibility: "none", "line-join": "round" },
+    paint: { "line-color": "#5b6b8c", "line-width": 1.2, "line-opacity": 0.75 },
+  });
+  mapObj.addLayer({
+    id: "ward-label",
+    type: "symbol",
+    source: "ward",
+    layout: {
+      visibility: "none",
+      "text-field": ["get", "ten"],
+      "text-size": ["interpolate", ["linear"], ["zoom"], 10, 10, 14, 13],
+      "text-font": ["Noto Sans Regular"],
+      "text-padding": 6,
+    },
+    paint: { "text-color": "#3c4a63", "text-halo-color": "#ffffff", "text-halo-width": 1.4 },
+  });
+  // Vùng đang chạm vào, tô nhạt cho thấy rõ mình đang đứng trong ranh nào.
+  mapObj.addSource("ward-pick", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  mapObj.addLayer({
+    id: "ward-pick-fill",
+    type: "fill",
+    source: "ward-pick",
+    paint: { "fill-color": "#2664ff", "fill-opacity": 0.16 },
+  });
+  return true;
+}
+
+let wardPick = null;
+
+function showWardPick(ward) {
+  wardPick = ward;
+  const source = mapObj?.getSource("ward-pick");
+  if (!source) return;
+  source.setData(
+    ward
+      ? { type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [ward.ring.map(([lat, lng]) => [lng, lat])] } }] }
+      : { type: "FeatureCollection", features: [] },
+  );
+}
+
+function syncWardLayer() {
+  if (!ensureWardLayer()) return;
+  const on = mapLayerState.ward;
+  ["ward-line", "ward-label"].forEach((id) => {
+    if (mapObj.getLayer(id)) mapObj.setLayoutProperty(id, "visibility", on ? "visible" : "none");
+  });
+  if (!on) showWardPick(null);
+}
+
+// Tra một điểm bất kỳ rồi kể lại bằng tiếng người.
+function tellWardAt(pos) {
+  if (!mapLayerState.ward) return;
+  const found = wardAt(pos);
+  showWardPick(found?.ward || null);
+  renderMapNote();
+  if (!found) {
+    toast(t("wardNone"), 4200);
+    return;
+  }
+  const edge = found.edge < 120 ? ` · ${t("wardEdge", { d: fmtDistance(found.edge) })}` : "";
+  toast(`${t("wardAt")}: ${wardLabel(found.ward)}${edge}`, 6000);
+}
+
+async function toggleWardLayer() {
+  if (!mapMode) await setMapMode(true, { silent: true });
+  if (!mapObj) return;
+  if (!wardData) {
+    toast(t("wardLoading"), 8000);
+    try {
+      await loadWards();
+    } catch {
+      toast(t("wardFail"), 5200);
+      return;
+    }
+  }
+  mapLayerState.ward = !mapLayerState.ward;
+  syncWardLayer();
+  renderMapLayerChips();
+  renderMapNote();
+  if (mapLayerState.ward) {
+    toast(t("wardTap"), 5000);
+    if (userPos) tellWardAt(userPos);
+  }
 }
 
 /* ---------- Cài về màn hình chính + chạy offline ---------- */
@@ -6074,6 +6316,7 @@ window.__atlas = {
   THREE,
   selectStartup,
   setMapMode,
+  wardAt,
   get map() {
     return mapObj;
   },

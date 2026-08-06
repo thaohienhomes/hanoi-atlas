@@ -1,3 +1,8 @@
+> **Đã xong, đây là ghi chú lịch sử.** Từ 06/08/2026 dự án deploy thẳng từ
+> repo GitHub `thaohienhomes/hanoi-atlas` — sửa file, `git push`, Vercel tự
+> build. Không cần làm gì trong tài liệu này nữa. Giữ lại để dò lại lịch sử
+> nếu cần, và để hiểu vì sao production trước đó được ghép như vậy.
+
 # Sơ đồ deploy · cách bản production được ghép lại
 
 Đọc file này trước khi deploy lại. Nó là thứ duy nhất ghi lại chuỗi ghép,

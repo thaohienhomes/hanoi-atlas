@@ -72,6 +72,17 @@ Trên nền bản đồ đường phố thật có hai chip bật lớp (`?lop=l
 
 Cả hai lớp đều đi qua `registerLayer()` và có link mở văn bản gốc ngay trong bảng ghi chú.
 
+## Tra phường xã sau sáp nhập / Ward lookup
+
+Từ 01/7/2025 Hà Nội còn **126 đơn vị cấp xã** — 51 phường và 75 xã — theo Nghị quyết 1656/NQ-UBTVQH15. Rất nhiều người vẫn chưa rõ nhà mình nay thuộc phường nào, mà cái đó thì cần cho giấy tờ và ghi địa chỉ.
+
+Bật chip **Phường xã mới** trên bản đồ đường phố thật (`?lop=phuong` để mở sẵn), rồi chạm vào bất kỳ chỗ nào là biết chỗ đó thuộc đâu; vùng vừa tra được tô xanh nhạt. Bấm **Gần tôi** thì nó tra luôn chỗ bạn đang đứng.
+
+- Ranh giới nằm ở `public/data/phuong-xa.txt` (61 KB, mã hoá delta), **chỉ tải khi bật lớp** nên ai không dùng không phải tải.
+- Bản GeoJSON đầy đủ để phân tích: `data/hanoi-126-phuong-xa.geojson`, mở được bằng QGIS.
+- Đã rút gọn ngưỡng 40 m, nên **đứng sát mép thì đừng tin ngay** — app tự cảnh báo khi điểm tra cách ranh giới dưới 120 m.
+- Không hiện dân số: OSM chỉ gắn cho 72/126 đơn vị, đưa vào là ra một con số thiếu gần một nửa số xã.
+
 ## Nguồn & đối chiếu / Sources and citations
 
 Nguyên tắc của dự án: **điều gì bản đồ khẳng định mà dựa vào văn bản nhà nước thì phải dẫn được về văn bản gốc.** Bảng **Nguồn & đối chiếu** (link ở chân thanh bên, chạm vào huy hiệu thời tiết, hoặc mở thẳng `#/nguon`) liệt kê từng văn bản kèm số hiệu, cơ quan ban hành, người ký, ngày ký, ngày hiệu lực, văn bản bị thay thế, dòng "Bản đồ dùng để…", và nút **Mở văn bản gốc ↗** trỏ về cổng thông tin nhà nước để người dùng tự đọc.

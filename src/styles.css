@@ -1937,3 +1937,22 @@ body.is-map .map-layers {
     flex: 0 0 auto;
   }
 }
+
+/* Lớp phường xã sau sáp nhập */
+.map-layers__item--ward {
+  --tone: #5b6b8c;
+}
+
+.map-layers__item--ward i {
+  border-radius: 2px;
+  border: 1.5px solid #5b6b8c;
+  background: oklch(56% 0.21 256 / 0.18);
+}
+
+.map-note__pick {
+  padding: 8px 11px;
+  border-radius: var(--radius-xs);
+  background: var(--color-accent-soft);
+  color: var(--color-ink);
+  font-size: var(--fs-md);
+}

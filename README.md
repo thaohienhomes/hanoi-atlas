@@ -64,7 +64,7 @@ Nền bản đồ này cũng là chỗ để chồng các lớp dữ liệu th�
 
 ## Lớp dữ liệu công / Civic data layers
 
-Trên nền bản đồ đường phố thật có hai chip bật lớp (`?lop=lez,sac` để mở sẵn):
+Trên nền bản đồ đường phố thật có bốn chip bật lớp (`?lop=lez,sac,phuong,quy-hoach` để mở sẵn):
 
 **Vùng phát thải thấp.** Ranh giới 9 phường lấy từ OpenStreetMap (`admin_level=6`, mức phường sau sáp nhập 2025), rút gọn Douglas–Peucker ngưỡng 25 m — 756 xuống 171 đỉnh, lệch tối đa 28 m so với ranh giới gốc. Vẽ **nét đứt** là cố ý. Bảng ghi chú nói rõ: *đường kẻ là ranh giới PHƯỜNG, không phải ranh giới vùng cấm; vùng thí điểm chỉ là một số khu vực bên trong.* **39/52 địa điểm** nằm trong 9 phường này — thẻ chi tiết của chúng có thêm một chip cảnh báo. Khung giờ cấm **không hiện**, vì Nghị quyết 57/2025/NQ-HĐND không ấn định giờ.
 
@@ -83,6 +83,19 @@ Bật chip **Phường xã mới** trên bản đồ đường phố thật (`?l
 - Đã rút gọn ngưỡng 40 m, nên **đứng sát mép thì đừng tin ngay** — app tự cảnh báo khi điểm tra cách ranh giới dưới 120 m.
 - Không hiện dân số: OSM chỉ gắn cho 72/126 đơn vị, đưa vào là ra một con số thiếu gần một nửa số xã.
 
+## Sơ đồ quy hoạch khung 2045 / Framework master plan
+
+Bật chip **Quy hoạch 2045** (`?lop=quy-hoach` để mở sẵn) là hiện **5 vùng đô thị** tô màu và **5 trục không gian** vẽ nét đứt, theo Quyết định 1668/QĐ-TTg ngày 27/12/2024. Chạm vào bản đồ để biết chỗ đó thuộc vùng nào.
+
+Có một chỗ vênh phải nói thẳng, và app cũng nói thẳng ngay trong ghi chú:
+
+- **Quyết định mô tả vùng theo quận, huyện cũ** — những đơn vị đã bỏ từ 01/7/2025. Muốn vẽ lên bản đồ hôm nay thì phải quy chiếu sang 126 phường xã mới. Cách làm: lấy ranh giới quận huyện trước sáp nhập từ [geoBoundaries](https://www.geoboundaries.org) (CC BY 4.0), rải lưới điểm bên trong từng phường xã mới, phần lớn diện tích rơi vào huyện cũ nào thì xếp theo vùng của huyện ấy. Đếm lại thì **số phường xã của cả 30 quận huyện cũ khớp đúng Nghị quyết 1656**. Dù vậy ranh giới vùng vẫn chỉ là tương đối — Hồng Hà, Phú Xuyên, Yên Xuân… nằm vắt qua hai huyện cũ.
+- **Quyết định xếp Thanh Oai và Thường Tín vào vùng phía Nam, đồng thời ghi "một phần Thanh Oai, Thường Tín" thuộc vùng phía Nam sông Hồng.** Ranh giới giữa hai vùng ở đó không đọc ra được từ văn bản, nên bản đồ để cả hai huyện cũ ở vùng phía Nam và ghi rõ chỗ vênh này.
+- **Năm trục chỉ được nêu tên mốc, không kèm toạ độ**, nên vẽ nét đứt nối các mốc ấy: chỉ hướng, không phải hướng tuyến kỹ thuật. Riêng trục sông Hồng lấy theo lòng sông thật trong OpenStreetMap rồi cắt vào địa giới Hà Nội.
+- Vì vậy lớp này luôn kèm một dòng cảnh báo **không tắt được**: đây là sơ đồ minh hoạ, **không phải bản đồ quy hoạch pháp lý**, không dùng để tra quy hoạch thửa đất, xin phép xây dựng hay mua bán nhà đất.
+
+Số phường xã mỗi vùng: Nam sông Hồng 55 · phía Đông 8 · phía Bắc 14 · phía Tây 29 · phía Nam 20 (tổng 126).
+
 ## Nguồn & đối chiếu / Sources and citations
 
 Nguyên tắc của dự án: **điều gì bản đồ khẳng định mà dựa vào văn bản nhà nước thì phải dẫn được về văn bản gốc.** Bảng **Nguồn & đối chiếu** (link ở chân thanh bên, chạm vào huy hiệu thời tiết, hoặc mở thẳng `#/nguon`) liệt kê từng văn bản kèm số hiệu, cơ quan ban hành, người ký, ngày ký, ngày hiệu lực, văn bản bị thay thế, dòng "Bản đồ dùng để…", và nút **Mở văn bản gốc ↗** trỏ về cổng thông tin nhà nước để người dùng tự đọc.
@@ -92,7 +105,7 @@ Nguyên tắc của dự án: **điều gì bản đồ khẳng định mà dự
 - `SOURCE_GAPS` ghi những chỗ **cố tình để trống**. Ví dụ: Nghị quyết 57/2025/NQ-HĐND nêu loại phương tiện và các mốc thời gian nhưng **không ấn định khung giờ cấm** — chi tiết chờ đề án của UBND thành phố. Bản đồ sẽ không hiện giờ nào cho tới khi có văn bản, vì một khung giờ bịa ra là có người đi nhầm đường thật.
 - `registerLayer(layerId, sourceIds)` bắt mọi lớp dữ liệu pháp lý khai nguồn trước khi được vẽ; thiếu là cảnh báo ngay ở console.
 
-Văn bản đang tham chiếu: Luật Thủ đô số 39/2024/QH15, Nghị quyết 57/2025/NQ-HĐND, Chỉ thị 20/CT-TTg, Nghị quyết 1656/NQ-UBTVQH15, Quyết định 1668/QĐ-TTg. Dữ liệu mở: OpenStreetMap (ODbL), OpenFreeMap, Open-Meteo.
+Văn bản đang tham chiếu: Luật Thủ đô số 39/2024/QH15, Nghị quyết 57/2025/NQ-HĐND, Chỉ thị 20/CT-TTg, Nghị quyết 1656/NQ-UBTVQH15, Quyết định 1668/QĐ-TTg. Dữ liệu mở: OpenStreetMap (ODbL), OpenFreeMap, Open-Meteo, geoBoundaries (CC BY 4.0).
 
 ## Dữ liệu thời gian thực / Live data
 

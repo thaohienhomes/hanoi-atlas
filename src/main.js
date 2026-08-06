@@ -4320,6 +4320,24 @@ const STRINGS = {
     wardLoading: "Đang tải ranh giới 126 phường xã…",
     wardFail: "Chưa tải được dữ liệu phường xã. Thử lại khi mạng ổn hơn.",
     wardOf: "Phường xã",
+    qhName: "Quy hoạch 2045",
+    qhOn: "Hiện 5 vùng đô thị và 5 trục không gian theo Quyết định 1668/QĐ-TTg",
+    qhTitle: "Quy hoạch khung Thủ đô 2045",
+    qhWhen: "Quyết định 1668/QĐ-TTg, ký 27/12/2024",
+    qhModel: "Mô hình: chùm đô thị, đa cực, đa trung tâm. Năm vùng đô thị nối nhau bằng năm trục không gian, ngăn cách bằng hành lang xanh.",
+    qhZones: "5 vùng đô thị",
+    qhAxes: "5 trục không gian",
+    qhCity: "Dự kiến lập thành phố phía Bắc (Đông Anh – Mê Linh – Sóc Sơn) và thành phố phía Tây (từ Sơn Tây); thành phố phía Nam đang nghiên cứu.",
+    qhWarn: "Đây là SƠ ĐỒ MINH HOẠ, không phải bản đồ quy hoạch pháp lý. Không dùng để tra quy hoạch thửa đất, xin phép xây dựng hay mua bán nhà đất.",
+    qhHowZone: "Quyết định mô tả vùng theo quận, huyện CŨ — những đơn vị đã bỏ từ 01/7/2025. Bản đồ quy chiếu sang 126 phường xã mới: mỗi phường xã tô màu theo huyện cũ chiếm phần lớn diện tích của nó. Ranh giới vì thế chỉ là tương đối.",
+    qhHowAxis: "Trục vẽ bằng nét đứt nối các mốc mà quyết định nêu tên. Văn bản không kèm toạ độ, nên đây là hướng đi minh hoạ, không phải hướng tuyến kỹ thuật.",
+    qhOverlap: "Quyết định vừa xếp Thanh Oai và Thường Tín vào vùng phía Nam, vừa ghi “một phần Thanh Oai, Thường Tín” thuộc vùng phía Nam sông Hồng. Ranh giới giữa hai vùng ở đó không đọc ra được từ văn bản; bản đồ để cả hai huyện cũ ở vùng phía Nam.",
+    qhTap: "Chạm vào bản đồ để xem vùng quy hoạch",
+    qhAt: "Vùng quy hoạch",
+    qhNone: "Chỗ này nằm ngoài địa giới Hà Nội",
+    qhLoading: "Đang tải ranh giới để vẽ sơ đồ quy hoạch…",
+    qhFail: "Chưa tải được dữ liệu. Thử lại khi mạng ổn hơn.",
+    qhWards: "{n} phường xã",
   },
   en: {
     title: "Hanoi Atlas — a 3D map of food, sights & homes",
@@ -4447,6 +4465,24 @@ const STRINGS = {
     wardLoading: "Loading the 126 ward boundaries…",
     wardFail: "Could not load the ward data. Try again on a better connection.",
     wardOf: "Ward",
+    qhName: "2045 master plan",
+    qhOn: "Show the five urban zones and five spatial axes from Decision 1668/QĐ-TTg",
+    qhTitle: "Framework master plan to 2045",
+    qhWhen: "Decision 1668/QĐ-TTg, signed 27 Dec 2024",
+    qhModel: "The model is a multi-polar, multi-centre urban cluster: five urban zones joined by five spatial axes and separated by green corridors.",
+    qhZones: "Five urban zones",
+    qhAxes: "Five spatial axes",
+    qhCity: "A northern city (Đông Anh – Mê Linh – Sóc Sơn) and a western city (from Sơn Tây) are planned; a southern city is under study.",
+    qhWarn: "This is an ILLUSTRATIVE SKETCH, not a legal planning map. Do not use it to check the zoning of a plot, apply for a building permit, or buy or sell property.",
+    qhHowZone: "The decision describes each zone as a list of OLD districts — units abolished on 1 July 2025. This map projects them onto the 126 new wards and communes: each one is coloured for the old district covering most of its area. The zone edges are therefore approximate.",
+    qhHowAxis: "Axes are drawn as dashed lines between the landmarks the decision names. The document carries no coordinates, so these show direction, not an engineered alignment.",
+    qhOverlap: "The decision places Thanh Oai and Thường Tín in the southern zone while also saying “part of Thanh Oai and Thường Tín” belongs to the zone south of the Red River. Where that line falls cannot be read from the text, so this map keeps both old districts in the southern zone.",
+    qhTap: "Tap the map to see the planning zone",
+    qhAt: "Planning zone",
+    qhNone: "This spot is outside Hanoi",
+    qhLoading: "Loading boundaries to draw the plan…",
+    qhFail: "Could not load the data. Try again on a better connection.",
+    qhWards: "{n} wards and communes",
   },
 };
 
@@ -4823,6 +4859,7 @@ function locateMe() {
 
       syncMapHere();
       if (mapLayerState.ward) tellWardAt(userPos);
+      if (mapLayerState.qh) tellQhAt(userPos);
       const onMap = insideHanoi(userPos);
       if (onMap && hereGroup) {
         hereGroup.position.copy(project(userPos.lat, userPos.lng, 0));
@@ -5178,6 +5215,16 @@ let mapHere = null;
 let mapLastError = "";
 const mapMarkers = new Map();
 
+// `map.isStyleLoaded()` trả về false cả khi chỉ có một nguồn đang tải dở —
+// kể cả nguồn do chính mình vừa thêm vào. Dùng nó làm cổng cho việc thêm lớp
+// thì lớp thêm sau sẽ bị chặn bởi lớp thêm trước, im lặng và rất khó dò.
+// Cái thật sự cần biết là "style đã dựng xong chưa", nên giữ riêng cờ này.
+let mapStyleReady = false;
+
+function styleReady() {
+  return Boolean(mapObj) && (mapStyleReady || mapObj.isStyleLoaded());
+}
+
 function isPhone() {
   return window.matchMedia("(max-width: 54rem)").matches;
 }
@@ -5249,8 +5296,10 @@ async function loadMap() {
       mapLastError = String(event?.error?.message || event?.error || event || "").slice(0, 240);
     });
     map.on("click", (event) => {
-      if (mapLayerState.ward) {
-        tellWardAt({ lat: event.lngLat.lat, lng: event.lngLat.lng });
+      const pos = { lat: event.lngLat.lat, lng: event.lngLat.lng };
+      if (mapLayerState.ward || mapLayerState.qh) {
+        if (mapLayerState.ward) tellWardAt(pos);
+        if (mapLayerState.qh) tellQhAt(pos);
         return;
       }
       clearSelection();
@@ -5259,6 +5308,7 @@ async function loadMap() {
     // Style có thể nạp lại (đổi nền, mất mạng rồi vào lại) — mỗi lần xong thì
     // đặt lại ngôn ngữ nhãn cho khớp nút VI | EN.
     map.on("style.load", () => {
+      mapStyleReady = true;
       applyMapLanguage();
       syncMapLayers();
     });
@@ -5598,9 +5648,25 @@ const SOURCES = [
     body: "Thủ tướng Chính phủ · Trần Hồng Hà ký",
     bodyEn: "Prime Minister · signed by Trần Hồng Hà",
     signed: "2024-12-27",
-    uses: "Sơ đồ quy hoạch khung sắp tới. Đây là bản vẽ minh hoạ theo văn bản, không thay được bản đồ quy hoạch pháp lý.",
-    usesEn: "The upcoming framework plan sketch. It illustrates the document and is not a legal planning map.",
+    uses: "5 vùng đô thị và 5 trục không gian trong lớp Quy hoạch 2045. Bản đồ chỉ vẽ lại lời văn, không thay được bản đồ quy hoạch pháp lý.",
+    usesEn: "The five urban zones and five spatial axes in the 2045 plan layer. The map redraws the wording and does not replace a legal planning map.",
+    note: "Quyết định mô tả từng vùng bằng danh sách quận, huyện CŨ. Từ 01/7/2025 Hà Nội bỏ cấp huyện, nên bản đồ phải quy chiếu sang 126 phường xã mới — ranh giới vùng vì thế chỉ là tương đối. Văn bản cũng không kèm toạ độ cho 5 trục.",
+    noteEn: "The decision describes each zone as a list of OLD districts. Hanoi abolished the district tier on 1 July 2025, so this map projects them onto the 126 new wards, making zone edges approximate. The document also gives no coordinates for the five axes.",
     url: "https://chinhphu.vn/?pageid=27160&docid=212179",
+  },
+  {
+    id: "geoboundaries",
+    group: "data",
+    kind: "Dữ liệu mở",
+    kindEn: "Open data",
+    ref: "geoBoundaries (VNM ADM2, 2020)",
+    title: "Ranh giới quận, huyện Việt Nam trước sáp nhập, dùng để đối chiếu phường xã mới với huyện cũ",
+    titleEn: "Vietnam's pre-merger district boundaries, used to match new wards to old districts",
+    body: "William & Mary geoLab · giấy phép CC BY 4.0 · nguồn gốc OCHA ROAP và Chính phủ Việt Nam",
+    bodyEn: "William & Mary geoLab · CC BY 4.0 · sourced from OCHA ROAP and the Government of Viet Nam",
+    uses: "Xếp 126 phường xã mới vào 30 quận huyện cũ bằng cách lấy mẫu lưới trong từng ranh giới rồi bỏ phiếu đa số. Kết quả khớp đúng số lượng của Nghị quyết 1656 ở cả 30 đơn vị.",
+    usesEn: "Assigns the 126 new wards to the 30 old districts by grid-sampling each boundary and taking a majority vote. The per-district counts match Resolution 1656 exactly for all 30.",
+    url: "https://www.geoboundaries.org/countryDownloads.html",
   },
   {
     id: "osm",
@@ -5872,7 +5938,7 @@ function lezWardOf(item) {
 
 /* ---------- Bật tắt lớp trên nền MapLibre ---------- */
 
-const mapLayerState = { lez: false, charge: false, ward: false };
+const mapLayerState = { lez: false, charge: false, ward: false, qh: false };
 
 function lezGeoJson() {
   return {
@@ -5902,7 +5968,7 @@ function ensureMapLayers() {
   if (!mapObj) return false;
   // Style có thể còn đang tải (hoặc vừa đổi nền): chưa thêm lớp được thì hẹn
   // thử lại đúng một lần khi bản đồ rảnh, chứ không bỏ luôn như trước.
-  if (!mapObj.isStyleLoaded()) {
+  if (!styleReady()) {
     if (!layerRetry) {
       layerRetry = true;
       mapObj.once("idle", () => {
@@ -5967,6 +6033,7 @@ function syncMapLayers() {
   show("lez-line", mapLayerState.lez);
   show("charge-dot", mapLayerState.charge);
   syncWardLayer();
+  syncQhLayer();
 }
 
 async function toggleMapLayer(key) {
@@ -5975,7 +6042,7 @@ async function toggleMapLayer(key) {
   if (!mapObj) return;
   mapLayerState[key] = !mapLayerState[key];
   syncMapLayers();
-  renderMapLayerChips();
+  renderMapLayerChips(key);
   renderMapNote();
   if (mapLayerState[key]) {
     if (key === "lez") openLezNote();
@@ -5985,7 +6052,7 @@ async function toggleMapLayer(key) {
 
 /* ---------- Chip bật lớp + ghi chú giải thích ---------- */
 
-function renderMapLayerChips() {
+function renderMapLayerChips(focusKey) {
   const host = document.querySelector("#pinLegend");
   if (!host) return;
   let strip = document.querySelector("#mapLayers");
@@ -5999,6 +6066,7 @@ function renderMapLayerChips() {
     { key: "lez", name: t("lezName"), title: t("lezOn"), tone: "lez" },
     { key: "charge", name: t("chargeName"), title: t("chargeOn", { n: chargePoints().length }), tone: "charge" },
     { key: "ward", name: t("wardName"), title: t("wardOn"), tone: "ward" },
+    { key: "qh", name: t("qhName"), title: t("qhOn"), tone: "qh" },
   ];
   strip.innerHTML = items
     .map(
@@ -6007,11 +6075,18 @@ function renderMapLayerChips() {
         `aria-pressed="${mapLayerState[item.key]}" title="${escapeHtml(item.title)}"><i></i>${escapeHtml(item.name)}</button>`,
     )
     .join("");
+  const special = { ward: toggleWardLayer, qh: toggleQhLayer };
   strip.querySelectorAll("[data-layer]").forEach((button) => {
-    button.addEventListener("click", () =>
-      button.dataset.layer === "ward" ? toggleWardLayer() : toggleMapLayer(button.dataset.layer),
-    );
+    const key = button.dataset.layer;
+    button.addEventListener("click", () => (special[key] ? special[key]() : toggleMapLayer(key)));
   });
+  // Trên điện thoại dải chip trượt ngang, chip cuối dễ nằm ngoài màn hình.
+  // Vừa bật lớp nào thì kéo chip của lớp đó vào tầm mắt.
+  if (focusKey) {
+    strip
+      .querySelector(`[data-layer="${focusKey}"]`)
+      ?.scrollIntoView({ inline: "nearest", block: "nearest", behavior: "smooth" });
+  }
 }
 
 function sourceLinkHtml(id) {
@@ -6022,7 +6097,7 @@ function sourceLinkHtml(id) {
 
 function renderMapNote() {
   let note = document.querySelector("#mapNote");
-  const on = mapMode && (mapLayerState.lez || mapLayerState.charge || mapLayerState.ward);
+  const on = mapMode && (mapLayerState.lez || mapLayerState.charge || mapLayerState.ward || mapLayerState.qh);
   if (!on) {
     note?.remove();
     return;
@@ -6062,6 +6137,7 @@ function renderMapNote() {
         <p class="map-note__srcs">${escapeHtml(t("srcSee"))}: ${sourceLinkHtml("nq-1656-2025")} ${sourceLinkHtml("osm")}</p>
       </article>`);
   }
+  if (mapLayerState.qh) blocks.push(qhNoteHtml());
   if (mapLayerState.charge) {
     const points = chargePoints();
     blocks.push(`
@@ -6085,11 +6161,13 @@ function bootMapLayers() {
   registerLayer("lez", ["nq-57-2025", "ct-20-2025", "luat-thu-do-2024", "osm"]);
   registerLayer("charge", ["osm"]);
   registerLayer("ward", ["nq-1656-2025", "osm"]);
+  registerLayer("qh", ["qd-1668-2024", "nq-1656-2025", "geoboundaries", "osm"]);
   renderMapLayerChips();
   const asked = (QUERY.get("lop") || "").toLowerCase().split(",").filter(Boolean);
   if (asked.includes("lez") || asked.includes("phatthai")) toggleMapLayer("lez");
   if (asked.includes("sac") || asked.includes("charge")) toggleMapLayer("charge");
   if (asked.includes("phuong") || asked.includes("ward")) toggleWardLayer();
+  if (asked.includes("quy-hoach") || asked.includes("quyhoach") || asked.includes("plan")) toggleQhLayer();
 }
 
 /* ==========================================================================
@@ -6177,18 +6255,32 @@ function wardAt(pos) {
 function wardGeoJson() {
   return {
     type: "FeatureCollection",
-    features: (wardData || []).map((w) => ({
+    features: (wardData || []).map((w, i) => ({
       type: "Feature",
-      properties: { ten: wardLabel(w) },
+      // `vung` là số hiệu vùng quy hoạch 1–5, để lớp Quy hoạch 2045 tô màu mà
+      // không phải tải lại một bộ ranh giới thứ hai.
+      properties: { ten: wardLabel(w), vung: QH_OF[i] || 0 },
       geometry: { type: "Polygon", coordinates: [w.ring.map(([lat, lng]) => [lng, lat])] },
     })),
   };
 }
 
 function ensureWardLayer() {
-  if (!mapObj || !wardData || !mapObj.isStyleLoaded()) return false;
+  if (!wardData || !styleReady()) return false;
   if (mapObj.getSource("ward")) return true;
   mapObj.addSource("ward", { type: "geojson", data: wardGeoJson() });
+  // Nền tô 5 vùng quy hoạch nằm dưới cùng, để nét ranh giới phường vẽ sau
+  // vẫn nổi lên trên khi bật cả hai lớp.
+  mapObj.addLayer({
+    id: "qh-fill",
+    type: "fill",
+    source: "ward",
+    layout: { visibility: "none" },
+    paint: {
+      "fill-color": ["match", ["get", "vung"], ...QH_ZONES.flatMap((z) => [z.id, z.color]), "#94a3b8"],
+      "fill-opacity": 0.3,
+    },
+  });
   mapObj.addLayer({
     id: "ward-line",
     type: "line",
@@ -6269,13 +6361,317 @@ async function toggleWardLayer() {
     }
   }
   mapLayerState.ward = !mapLayerState.ward;
-  syncWardLayer();
-  renderMapLayerChips();
+  syncMapLayers();
+  renderMapLayerChips("ward");
   renderMapNote();
   if (mapLayerState.ward) {
     toast(t("wardTap"), 5000);
     if (userPos) tellWardAt(userPos);
   }
+}
+
+/* ==========================================================================
+   SƠ ĐỒ QUY HOẠCH KHUNG THỦ ĐÔ 2045 · FRAMEWORK MASTER PLAN
+   Nguồn duy nhất: Quyết định 1668/QĐ-TTg ngày 27/12/2024.
+
+   Có một chỗ vênh phải nói thẳng. Quyết định mô tả từng vùng đô thị bằng
+   danh sách quận, huyện — mà cấp huyện đã bỏ từ 01/7/2025. Muốn vẽ được lên
+   bản đồ hôm nay thì phải quy chiếu sang 126 phường xã mới.
+
+   Cách quy chiếu: lấy ranh giới quận huyện Việt Nam trước sáp nhập
+   (geoBoundaries VNM ADM2), rải lưới điểm bên trong từng phường xã mới, xem
+   phần lớn diện tích rơi vào huyện cũ nào thì xếp phường xã đó vào vùng của
+   huyện ấy. Làm xong đếm lại: số phường xã của cả 30 quận huyện cũ khớp đúng
+   Nghị quyết 1656. Dù vậy ranh giới vùng vẫn chỉ là tương đối — phường Hồng
+   Hà, Phú Xuyên, Yên Xuân… nằm vắt qua hai huyện cũ.
+
+   Năm trục thì quyết định chỉ nêu tên mốc, không kèm toạ độ. Nên trục vẽ nét
+   đứt nối các mốc ấy: chỉ hướng, không phải hướng tuyến kỹ thuật.
+
+   Vì vậy lớp này luôn kèm một dòng cảnh báo không tắt được: đây là sơ đồ
+   minh hoạ, không thay bản đồ quy hoạch pháp lý. Ai cần tra quy hoạch thửa
+   đất phải hỏi cơ quan quản lý, không tra ở đây.
+   ========================================================================== */
+
+// Vùng của từng phường xã, theo đúng thứ tự dòng trong public/data/phuong-xa.txt.
+const QH_PACKED =
+  "114124521554415113115114311214114445111115545114311112345111131141214154253451434431445114141511323155343411551542131141413114";
+const QH_OF = [...QH_PACKED].map(Number);
+
+const QH_ZONES = [
+  {
+    id: 1,
+    color: "#d9534f",
+    name: "Vùng đô thị phía Nam sông Hồng",
+    nameEn: "Zone south of the Red River",
+    old: "Nội đô lịch sử và mở rộng, Hà Đông, Đan Phượng, Hoài Đức, Thanh Trì",
+    oldEn: "The historic and extended inner city, Hà Đông, Đan Phượng, Hoài Đức, Thanh Trì",
+  },
+  {
+    id: 2,
+    color: "#2f80c9",
+    name: "Vùng đô thị phía Đông",
+    nameEn: "Eastern zone",
+    old: "Long Biên, Gia Lâm",
+    oldEn: "Long Biên, Gia Lâm",
+  },
+  {
+    id: 3,
+    color: "#7c5cd6",
+    name: "Vùng đô thị phía Bắc",
+    nameEn: "Northern zone",
+    old: "Đông Anh, Mê Linh, Sóc Sơn — dự kiến lập thành phố phía Bắc",
+    oldEn: "Đông Anh, Mê Linh, Sóc Sơn — a northern city is planned here",
+  },
+  {
+    id: 4,
+    color: "#3f9e5a",
+    name: "Vùng đô thị phía Tây",
+    nameEn: "Western zone",
+    old: "Sơn Tây, Ba Vì, Phúc Thọ, Quốc Oai, Thạch Thất, Chương Mỹ",
+    oldEn: "Sơn Tây, Ba Vì, Phúc Thọ, Quốc Oai, Thạch Thất, Chương Mỹ",
+  },
+  {
+    id: 5,
+    color: "#d9932b",
+    name: "Vùng đô thị phía Nam",
+    nameEn: "Southern zone",
+    old: "Thanh Oai, Mỹ Đức, Ứng Hòa, Thường Tín, Phú Xuyên",
+    oldEn: "Thanh Oai, Mỹ Đức, Ứng Hòa, Thường Tín, Phú Xuyên",
+  },
+];
+
+const QH_ZONE_BY_ID = Object.fromEntries(QH_ZONES.map((z) => [z.id, z]));
+
+// Năm trục. Đường sông Hồng lấy theo lòng sông thật trong OpenStreetMap rồi
+// cắt vào địa giới Hà Nội; bốn trục còn lại nối các mốc mà quyết định nêu tên.
+const QH_AXES = [
+  {
+    id: "song-hong",
+    name: "Trục sông Hồng",
+    nameEn: "Red River axis",
+    what: "Không gian xanh trung tâm của đô thị trung tâm, kết hợp với sông Đuống.",
+    whatEn: "The central green spine of the core city, together with the Đuống River.",
+    ends: ["Ba Vì – Sơn Tây", "Phú Xuyên"],
+    real: true,
+    line: [
+      [21.2196, 105.4392], [21.1827, 105.4637], [21.1598, 105.4921], [21.1557, 105.5092],
+      [21.1525, 105.5383], [21.1522, 105.5589], [21.1568, 105.5746], [21.1603, 105.5992],
+      [21.1722, 105.6189], [21.1613, 105.6402], [21.1473, 105.6471], [21.1332, 105.6639],
+      [21.1404, 105.6877], [21.1428, 105.7053], [21.1344, 105.7182], [21.1145, 105.7253],
+      [21.1031, 105.7372], [21.0985, 105.7523], [21.0931, 105.7677], [21.0972, 105.7856],
+      [21.1028, 105.8038], [21.0965, 105.8225], [21.086, 105.8377], [21.0669, 105.853],
+      [21.0529, 105.8567], [21.0288, 105.8661], [21.0124, 105.871], [21.0018, 105.8875],
+      [20.9937, 105.9022], [20.9807, 105.9101], [20.9646, 105.9003], [20.9524, 105.8907],
+      [20.939, 105.8822], [20.9293, 105.8957], [20.897, 105.8945], [20.8865, 105.9091],
+      [20.8732, 105.93], [20.8333, 105.9121], [20.8095, 105.9143], [20.7923, 105.9217],
+      [20.7838, 105.9343], [20.7789, 105.9598],
+    ],
+  },
+  {
+    id: "ho-tay-ba-vi",
+    name: "Trục Hồ Tây – Ba Vì",
+    nameEn: "Hồ Tây – Ba Vì axis",
+    what: "Nối trung tâm với thành phố phía Tây, gắn văn hoá Thăng Long – Xứ Đoài.",
+    whatEn: "Links the centre to the western city, tying Thăng Long and Xứ Đoài culture together.",
+    ends: ["Hồ Tây", "Ba Vì"],
+    line: [
+      [21.058, 105.814], [21.048, 105.77], [21.04, 105.71], [21.035, 105.64],
+      [21.03, 105.57], [21.025, 105.5], [21.021, 105.44], [21.0184, 105.393],
+    ],
+  },
+  {
+    id: "ho-tay-co-loa",
+    name: "Trục Hồ Tây – Cổ Loa",
+    nameEn: "Hồ Tây – Cổ Loa axis",
+    what: "Trục kết nối di sản, qua cầu Tứ Liên sang thành Cổ Loa.",
+    whatEn: "A heritage axis running over the Tứ Liên bridge to the Cổ Loa citadel.",
+    ends: ["Hồ Tây", "Cổ Loa"],
+    line: [[21.062, 105.821], [21.074, 105.842], [21.09, 105.857], [21.103, 105.87], [21.1136, 105.8766]],
+  },
+  {
+    id: "nhat-tan-noi-bai",
+    name: "Trục Nhật Tân – Nội Bài",
+    nameEn: "Nhật Tân – Nội Bài axis",
+    what: "Trục kinh tế, đô thị thông minh, nối sân bay cửa ngõ quốc tế Nội Bài.",
+    whatEn: "An economic and smart-city axis to Nội Bài international gateway airport.",
+    ends: ["Cầu Nhật Tân", "Sân bay Nội Bài"],
+    line: [[21.0983, 105.8232], [21.125, 105.808], [21.16, 105.798], [21.195, 105.799], [21.2189, 105.8045]],
+  },
+  {
+    id: "nam-ha-noi",
+    name: "Trục Nam Hà Nội",
+    nameEn: "South Hanoi axis",
+    what: "Gắn với trục văn hoá Mỹ Đình – Ba Sao – Bái Đính và sân bay thứ hai vùng Thủ đô.",
+    whatEn: "Follows the Mỹ Đình – Ba Sao – Bái Đính cultural corridor and the capital region's second airport.",
+    ends: ["Mỹ Đình", "Bái Đính"],
+    line: [
+      [21.0205, 105.7639], [20.97, 105.775], [20.91, 105.79], [20.84, 105.8],
+      [20.77, 105.81], [20.7, 105.815], [20.63, 105.817], [20.5623, 105.818],
+      [20.45, 105.84], [20.35, 105.855], [20.2728, 105.864],
+    ],
+  },
+];
+
+function qhAxisGeoJson() {
+  const features = [];
+  for (const axis of QH_AXES) {
+    features.push({
+      type: "Feature",
+      properties: { ten: LANG === "en" ? axis.nameEn : axis.name, kind: "line" },
+      geometry: { type: "LineString", coordinates: axis.line.map(([lat, lng]) => [lng, lat]) },
+    });
+    [axis.line[0], axis.line[axis.line.length - 1]].forEach((point, i) => {
+      features.push({
+        type: "Feature",
+        properties: { ten: axis.ends[i], kind: "end" },
+        geometry: { type: "Point", coordinates: [point[1], point[0]] },
+      });
+    });
+  }
+  return { type: "FeatureCollection", features };
+}
+
+function ensureQhAxes() {
+  if (!styleReady()) return false;
+  if (mapObj.getSource("qh-truc")) return true;
+  mapObj.addSource("qh-truc", { type: "geojson", data: qhAxisGeoJson() });
+  // Nét đứt là cố ý, giống lớp vùng phát thải thấp: nhắc rằng đây là hướng
+  // minh hoạ chứ không phải một tuyến đã cắm mốc ngoài thực địa.
+  mapObj.addLayer({
+    id: "qh-truc-line",
+    type: "line",
+    source: "qh-truc",
+    filter: ["==", ["get", "kind"], "line"],
+    layout: { visibility: "none", "line-join": "round", "line-cap": "round" },
+    paint: {
+      "line-color": "#0f172a",
+      "line-width": ["interpolate", ["linear"], ["zoom"], 8, 1.6, 12, 3, 15, 4.5],
+      "line-opacity": 0.72,
+      "line-dasharray": [2.4, 1.8],
+    },
+  });
+  mapObj.addLayer({
+    id: "qh-truc-dot",
+    type: "circle",
+    source: "qh-truc",
+    filter: ["==", ["get", "kind"], "end"],
+    layout: { visibility: "none" },
+    paint: {
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 8, 3.2, 13, 5.5],
+      "circle-color": "#0f172a",
+      "circle-stroke-width": 1.6,
+      "circle-stroke-color": "#ffffff",
+    },
+  });
+  mapObj.addLayer({
+    id: "qh-truc-label",
+    type: "symbol",
+    source: "qh-truc",
+    filter: ["==", ["get", "kind"], "line"],
+    layout: {
+      visibility: "none",
+      "symbol-placement": "line-center",
+      "text-field": ["get", "ten"],
+      "text-size": ["interpolate", ["linear"], ["zoom"], 8, 10, 13, 13],
+      "text-font": ["Noto Sans Regular"],
+      "text-padding": 8,
+    },
+    paint: { "text-color": "#0f172a", "text-halo-color": "#ffffff", "text-halo-width": 1.8 },
+  });
+  return true;
+}
+
+// Vùng quy hoạch của một điểm bất kỳ. Trả về cả phường xã để người dùng đối
+// chiếu được: "chỗ này là xã Bát Tràng, nằm trong vùng đô thị phía Đông".
+function qhAt(pos) {
+  const found = wardAt(pos);
+  if (!found) return null;
+  const index = wardData.indexOf(found.ward);
+  const zone = QH_ZONE_BY_ID[QH_OF[index]];
+  return zone ? { zone, ward: found.ward } : null;
+}
+
+let qhPick = null;
+
+function syncQhLayer() {
+  const on = mapLayerState.qh;
+  if (on) ensureQhAxes();
+  const show = (id) => {
+    if (mapObj?.getLayer(id)) mapObj.setLayoutProperty(id, "visibility", on ? "visible" : "none");
+  };
+  ["qh-fill", "qh-truc-line", "qh-truc-dot", "qh-truc-label"].forEach(show);
+  if (!on) qhPick = null;
+}
+
+function tellQhAt(pos) {
+  if (!mapLayerState.qh) return;
+  const found = qhAt(pos);
+  qhPick = found;
+  renderMapNote();
+  if (!found) {
+    toast(t("qhNone"), 4200);
+    return;
+  }
+  const zone = LANG === "en" ? found.zone.nameEn : found.zone.name;
+  toast(`${wardLabel(found.ward)} · ${zone}`, 6000);
+}
+
+async function toggleQhLayer() {
+  if (!mapMode) await setMapMode(true, { silent: true });
+  if (!mapObj) return;
+  if (!wardData) {
+    toast(t("qhLoading"), 8000);
+    try {
+      await loadWards();
+    } catch {
+      toast(t("qhFail"), 5200);
+      return;
+    }
+  }
+  mapLayerState.qh = !mapLayerState.qh;
+  // Đi qua syncMapLayers để dùng chung cơ chế hẹn thử lại khi style chưa xong,
+  // thay vì tự gọi rồi im lặng bỏ cuộc.
+  syncMapLayers();
+  renderMapLayerChips("qh");
+  renderMapNote();
+  if (mapLayerState.qh) toast(t("qhTap"), 5000);
+}
+
+function qhNoteHtml() {
+  const zones = QH_ZONES.map((z) => {
+    const count = QH_OF.filter((v) => v === z.id).length;
+    return (
+      `<li><i style="background:${z.color}"></i><b>${escapeHtml(LANG === "en" ? z.nameEn : z.name)}</b>` +
+      `<span>${escapeHtml(LANG === "en" ? z.oldEn : z.old)} · ${escapeHtml(t("qhWards", { n: count }))}</span></li>`
+    );
+  }).join("");
+  const axes = QH_AXES.map(
+    (a) =>
+      `<li><b>${escapeHtml(LANG === "en" ? a.nameEn : a.name)}</b>` +
+      `<span>${escapeHtml(LANG === "en" ? a.whatEn : a.what)}</span></li>`,
+  ).join("");
+  const picked = qhPick
+    ? `<p class="map-note__pick"><b>${escapeHtml(wardLabel(qhPick.ward))}</b> — ` +
+      `${escapeHtml(LANG === "en" ? qhPick.zone.nameEn : qhPick.zone.name)}</p>`
+    : `<p class="map-note__next">${escapeHtml(t("qhTap"))}</p>`;
+  return `
+    <article class="map-note__block">
+      <h3>${escapeHtml(t("qhTitle"))}</h3>
+      <p class="map-note__when">${escapeHtml(t("qhWhen"))}</p>
+      <p class="map-note__warn map-note__warn--hard">${escapeHtml(t("qhWarn"))}</p>
+      ${picked}
+      <p>${escapeHtml(t("qhModel"))}</p>
+      <h4>${escapeHtml(t("qhZones"))}</h4>
+      <ul class="map-note__legend">${zones}</ul>
+      <h4>${escapeHtml(t("qhAxes"))}</h4>
+      <ul class="map-note__axes">${axes}</ul>
+      <p>${escapeHtml(t("qhCity"))}</p>
+      <p class="map-note__gap">${escapeHtml(t("qhHowZone"))}</p>
+      <p class="map-note__gap">${escapeHtml(t("qhOverlap"))}</p>
+      <p class="map-note__gap">${escapeHtml(t("qhHowAxis"))}</p>
+      <p class="map-note__srcs">${escapeHtml(t("srcSee"))}: ${sourceLinkHtml("qd-1668-2024")} ${sourceLinkHtml("nq-1656-2025")} ${sourceLinkHtml("geoboundaries")}</p>
+    </article>`;
 }
 
 /* ---------- Cài về màn hình chính + chạy offline ---------- */
@@ -6317,6 +6713,7 @@ window.__atlas = {
   selectStartup,
   setMapMode,
   wardAt,
+  qhAt,
   get map() {
     return mapObj;
   },

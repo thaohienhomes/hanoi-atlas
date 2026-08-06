@@ -1956,3 +1956,74 @@ body.is-map .map-layers {
   color: var(--color-ink);
   font-size: var(--fs-md);
 }
+
+/* Lớp sơ đồ quy hoạch khung 2045 */
+.map-layers__item--qh {
+  --tone: #7c5cd6;
+}
+
+/* Ô màu của chip xếp chéo năm màu vùng, để nhìn là biết chip này mở ra cái gì. */
+.map-layers__item--qh i {
+  border-radius: 2px;
+  border: 1.5px solid oklch(50% 0.16 300 / 0.75);
+  background: linear-gradient(135deg, #d9534f 0 20%, #2f80c9 20% 40%, #7c5cd6 40% 60%, #3f9e5a 60% 80%, #d9932b 80% 100%);
+}
+
+.map-note h4 {
+  margin: 10px 0 0;
+  color: var(--color-ink);
+  font-size: var(--fs-sm);
+}
+
+/* Cảnh báo mạnh hơn map-note__warn: dành riêng cho chỗ người ta có thể mất
+   tiền thật nếu tin nhầm — tra quy hoạch đất bằng một sơ đồ minh hoạ. */
+.map-note__warn--hard {
+  border-left-color: oklch(58% 0.2 25);
+  background: oklch(62% 0.2 25 / 0.14);
+  color: oklch(40% 0.16 25);
+  font-weight: 600;
+}
+
+.map-note__legend,
+.map-note__axes {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.map-note__legend li {
+  display: grid;
+  grid-template-columns: 12px 1fr;
+  gap: 8px;
+  align-items: start;
+}
+
+.map-note__legend i {
+  margin-top: 4px;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  opacity: 0.85;
+}
+
+.map-note__legend b,
+.map-note__axes b {
+  display: block;
+  color: var(--color-ink);
+  font-size: var(--fs-sm);
+}
+
+.map-note__legend span,
+.map-note__axes span {
+  display: block;
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+}
+
+.map-note__axes li {
+  padding-left: 14px;
+  border-left: 2px dashed oklch(50% 0.02 258 / 0.5);
+}

@@ -1,0 +1,739 @@
+##### src/main.js 196690
+@@ -2989,2 +2989,3 @@
+   document.body.classList.toggle("is-focused", Boolean(state.selectedId));
++  syncMapMarkers();
+
+@@ -3040,2 +3041,3 @@
+   flyTo(area.focus);
++  mapFocusArea(areaId);
+   renderAreaDetail(area);
+@@ -3053,2 +3055,3 @@
+   flyTo({ lat: startup.lat, lng: startup.lng, distance: 18, height: 16, rotation: 0.72 }, { cinematic: true });
++  mapFocusPlace(startup);
+   engageFocus(startup);
+@@ -3491,2 +3494,8 @@
+   const elapsed = clock.elapsedTime;
++  // Ở chế độ bản đồ thật khung 3D bị che hẳn: ngừng vẽ cho đỡ tốn pin, nhưng
++  // vẫn giữ vòng lặp sống nên bấm quay lại là hiện ngay, không phải dựng lại.
++  if (mapMode) {
++    window.requestAnimationFrame(animate);
++    return;
++  }
+   updateFlight();
+@@ -4130,3 +4139,3 @@
+     if (!(el instanceof HTMLImageElement)) return;
+-    if (!/(?:marker-label__logo|detail-card__logo|search-result__logo)/.test(el.className)) return;
++    if (!/(?:marker-label__logo|detail-card__logo|search-result__logo|map-pin__logo)/.test(el.className)) return;
+     const stage = el.dataset.stage || el.closest("[data-stage]")?.dataset.stage || "";
+@@ -4238,2 +4247,10 @@
+     wxSource: "Nguồn: Open-Meteo · tự làm mới mỗi 15 phút",
++    mapReal: "Bản đồ thật",
++    mapRealTitle: "Xem trên bản đồ đường phố thật — đủ từng ngõ ngách (phím M)",
++    map3d: "Bản đồ 3D",
++    map3dTitle: "Quay lại thành phố 3D (phím M)",
++    mapLoading: "Đang tải bản đồ đường phố…",
++    mapFail: "Chưa tải được bản đồ đường phố. Kiểm tra kết nối rồi thử lại nhé.",
++    mapHint: "Pin trên nền này là vị trí thật ngoài đường — phóng to để thấy tên.",
++    mapApprox: "Vị trí ước lượng, chưa dò được trên OpenStreetMap",
+   },
+@@ -4309,2 +4326,10 @@
+     wxSource: "Source: Open-Meteo · refreshes every 15 min",
++    mapReal: "Street map",
++    mapRealTitle: "Switch to the real street map — every lane and alley (press M)",
++    map3d: "3D map",
++    map3dTitle: "Back to the 3D city (press M)",
++    mapLoading: "Loading the street map…",
++    mapFail: "Could not load the street map. Check your connection and try again.",
++    mapHint: "Pins here sit at their real street positions — zoom in for names.",
++    mapApprox: "Approximate position, not yet matched on OpenStreetMap",
+   },
+@@ -4412,2 +4437,12 @@
+   }
++  // Nút lật 3D ⇄ bản đồ thật đổi cả chữ lẫn nghĩa theo chế độ đang xem.
++  const modeBtn = document.querySelector("#mapMode");
++  if (modeBtn) {
++    const label = mapMode ? t("map3d") : t("mapReal");
++    modeBtn.title = mapMode ? t("map3dTitle") : t("mapRealTitle");
++    modeBtn.setAttribute("aria-label", label);
++    modeBtn.setAttribute("aria-pressed", String(mapMode));
++    const span = modeBtn.querySelector(".tool-btn__label");
++    if (span) span.textContent = label;
++  }
+
+@@ -4415,2 +4450,5 @@
+
++  applyMapLanguage();
++  renderMapPinNames();
++
+   // Phần động: chỉ vẽ lại khi scene đã dựng xong.
+@@ -4496,3 +4534,70 @@
+
+-function metresBetween(a, b) {
++/* ---------- Toạ độ thật ngoài thực địa ---------- */
++
++// lat/lng trong data.js là toạ độ VẼ: chúng đặt pin đúng chỗ trên thành phố 3D
++// vẽ tay, nhưng so với thực địa có thể lệch cả cây số. Bảng dưới là toạ độ THẬT,
++// dò từ OpenStreetMap (Nominatim) với gợi ý tên riêng cho từng nơi rồi lọc bằng
++// ngưỡng 900 m: 45/52 điểm khớp, sai lệch trung bình 192 m. Dùng để đo khoảng
++// cách "Gần tôi" và để cắm pin trên chế độ bản đồ đường phố thật. 7 điểm còn
++// lại OSM chưa có hoặc trùng tên nên vẫn dùng toạ độ vẽ.
++const REAL_COORDS = {
++  "pho-bat-dan": [21.03364, 105.84638],
++  "pho-10-ly-quoc-su": [21.03047, 105.84885],
++  "pho-thin-lo-duc": [21.01704, 105.856],
++  "bun-cha-huong-lien": [21.01805, 105.85388],
++  "bun-cha-dac-kim": [21.03232, 105.84807],
++  "cha-ca-la-vong": [21.03568, 105.84915],
++  "ca-phe-giang": [21.03427, 105.8545],
++  "ca-phe-dinh": [21.032, 105.85239],
++  "cong-ca-phe": [21.02881, 105.84965],
++  "bia-ta-hien": [21.0353, 105.85199],
++  "banh-mi-25": [21.03617, 105.84872],
++  "xoi-yen": [21.03377, 105.85454],
++  "pho-cuon-ngu-xa": [21.04598, 105.84106],
++  "banh-tom-ho-tay": [21.04732, 105.83763],
++  "quan-an-ngon": [21.02626, 105.84342],
++  "ho-guom": [21.02883, 105.85254],
++  "den-ngoc-son": [21.03073, 105.85238],
++  "cho-dong-xuan": [21.0381, 105.8494],
++  "o-quan-chuong": [21.03733, 105.85221],
++  "nha-tho-lon": [21.02831, 105.85008],
++  "nha-hat-lon": [21.02414, 105.85976],
++  "hoa-lo": [21.02542, 105.84651],
++  "bao-tang-phu-nu": [21.02335, 105.8516],
++  "lang-bac": [21.03678, 105.83469],
++  "chua-mot-cot": [21.03586, 105.83361],
++  "hoang-thanh": [21.03839, 105.84062],
++  "cot-co": [21.03259, 105.83982],
++  "van-mieu": [21.02945, 105.83673],
++  "chua-tran-quoc": [21.04783, 105.83673],
++  "duong-thanh-nien": [21.04693, 105.8367],
++  "cau-long-bien": [21.04307, 105.85803],
++  "cv-thong-nhat": [21.01233, 105.84379],
++  "svd-my-dinh": [21.0205, 105.76393],
++  "bao-tang-dan-toc-hoc": [21.04008, 105.79884],
++  "bao-tang-ha-noi": [21.01001, 105.78631],
++  "vin-metropolis": [21.0315, 105.81507],
++  "lotte-center": [21.03227, 105.81263],
++  "keangnam-l72": [21.01735, 105.78359],
++  "vin-skylake": [21.02002, 105.78191],
++  "sunshine-city": [21.08345, 105.81122],
++  "dle-roi-soleil": [21.06535, 105.82703],
++  "sun-thuy-khue": [21.04078, 105.82598],
++  "vin-times-city": [20.99779, 105.86823],
++  "vin-royal-city": [21.00217, 105.81549],
++  "mipec-riverside": [21.04588, 105.86617],
++};
++
++function realPos(item) {
++  const found = item?.id ? REAL_COORDS[item.id] : null;
++  return found ? { lat: found[0], lng: found[1] } : item;
++}
++
++function hasRealPos(item) {
++  return Boolean(item?.id && REAL_COORDS[item.id]);
++}
++
++function metresBetween(rawA, rawB) {
++  const a = realPos(rawA);
++  const b = realPos(rawB);
+   const R = 6371000;
+@@ -4601,2 +4706,3 @@
+
++      syncMapHere();
+       const onMap = insideHanoi(userPos);
+@@ -4901,7 +5007,371 @@
+
++  const mode = document.createElement("button");
++  mode.id = "mapMode";
++  mode.type = "button";
++  mode.className = "tool-btn";
++  mode.innerHTML =
++    '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" d="M9 3.6 3.5 5.8v14.6L9 18.2l6 2.2 5.5-2.2V3.6L15 5.8 9 3.6Z"/><path fill="none" stroke="currentColor" stroke-width="1.9" d="M9 3.6v14.6M15 5.8v14.6"/></svg><span class="tool-btn__label"></span>';
++  mode.addEventListener("click", () => setMapMode(!mapMode));
++
+   host.insertBefore(lang, anchor);
+   host.insertBefore(near, anchor);
++  host.insertBefore(mode, anchor);
++  applyLanguage({ silent: true });
++}
++
++/* ==========================================================================
++   CHẾ ĐỘ BẢN ĐỒ ĐƯỜNG PHỐ THẬT · REAL STREET MAP
++   Thành phố 3D là bản vẽ tay — đẹp để nhìn tổng thể, nhưng không đi theo được.
++   Nút "Bản đồ thật" lật sang nền OpenStreetMap qua OpenFreeMap (miễn phí,
++   không cần API key, không giới hạn lượt gọi, dùng thương mại được) và cắm 52
++   pin bằng toạ độ thực địa, đủ chi tiết để dò từng ngõ. Thư viện MapLibre chỉ
++   tải xuống khi bấm nút, nên ai không dùng thì không phải tải thêm gì.
++   Nền này cũng là chỗ để chồng các lớp dữ liệu thật sắp tới: vùng phát thải
++   thấp, trạm sạc, ranh giới phường mới sau sáp nhập.
++   Mở thẳng bằng ?che-do=ban-do · phím tắt M.
++   ========================================================================== */
++
++// Ba nền có sẵn của OpenFreeMap; đổi bằng ?nen=duong|sang|dam, hoặc dán thẳng
++// link style JSON khác vào ?nen= nếu muốn thử nền riêng.
++const MAP_STYLES = {
++  duong: "https://tiles.openfreemap.org/styles/liberty",
++  sang: "https://tiles.openfreemap.org/styles/bright",
++  dam: "https://tiles.openfreemap.org/styles/positron",
++};
++
++function mapStyleUrl() {
++  const asked = (QUERY.get("nen") || "").trim();
++  if (/^https?:\/\//i.test(asked)) return asked;
++  return MAP_STYLES[asked.toLowerCase()] || MAP_STYLES.duong;
++}
++
++const MAP_HOME = { lng: 105.8412, lat: 21.0293, zoom: 11.4 };
++const MAP_LIMIT = [
++  [104.8, 19.9],
++  [107.2, 22.1],
++];
++
++let mapMode = false;
++let mapLib = null;
++let mapObj = null;
++let mapHost = null;
++let mapBooting = null;
++let mapHere = null;
++let mapLastError = "";
++const mapMarkers = new Map();
++
++function isPhone() {
++  return window.matchMedia("(max-width: 54rem)").matches;
++}
++
++// Chừa chỗ cho thanh điều hướng bên trái (máy tính) hoặc dải chip dưới đáy
++// (điện thoại), để điểm được chọn không nằm khuất sau HUD.
++function mapPadding() {
++  if (isPhone()) return { top: 76, right: 24, bottom: 200, left: 24 };
++  return { top: 96, right: 96, bottom: 64, left: 392 };
++}
++
++function ensureMapHost() {
++  if (mapHost) return mapHost;
++  mapHost = document.createElement("div");
++  mapHost.id = "realMap";
++  mapHost.className = "real-map";
++  mapHost.setAttribute("aria-hidden", "true");
++  const shell = document.querySelector("#app");
++  shell?.insertBefore(mapHost, document.querySelector("#labelsLayer"));
++  return mapHost;
++}
++
++async function loadMap() {
++  if (mapObj) return mapObj;
++  if (mapBooting) return mapBooting;
++  mapBooting = (async () => {
++    // Tải trễ: gói MapLibre nằm ở chunk riêng, chỉ về máy khi thật sự cần.
++    const [mod] = await Promise.all([import("maplibre-gl"), import("maplibre-gl/dist/maplibre-gl.css")]);
++    // v5 xuất default, v6 xuất theo tên — nhận cả hai.
++    const lib = mod?.Map ? mod : mod.default;
++    mapLib = lib;
++    const host = ensureMapHost();
++    const phone = isPhone();
++    const map = new lib.Map({
++      container: host,
++      style: mapStyleUrl(),
++      center: [MAP_HOME.lng, MAP_HOME.lat],
++      zoom: MAP_HOME.zoom,
++      minZoom: 9,
++      maxZoom: 19,
++      maxBounds: MAP_LIMIT,
++      attributionControl: { compact: true },
++      hash: false,
++    });
++
++    const corner = phone ? "top-left" : "bottom-right";
++    if (!phone) map.addControl(new lib.NavigationControl({ visualizePitch: true }), corner);
++    const geo = new lib.GeolocateControl({
++      positionOptions: { enableHighAccuracy: true },
++      trackUserLocation: true,
++      showUserLocation: false, // đã có chấm "bạn ở đây" dùng chung với bản 3D
++    });
++    geo.on("geolocate", (event) => {
++      const coords = event?.coords;
++      if (!coords) return;
++      userPos = { lat: coords.latitude, lng: coords.longitude };
++      document.querySelector("#nearMe")?.classList.add("is-on");
++      syncMapHere();
++      const chosen = state.selectedId ? STARTUPS.find((s) => s.id === state.selectedId) : null;
++      if (chosen) renderStartupDetail(chosen);
++    });
++    map.addControl(geo, corner);
++    // Thước tỉ lệ: máy tính đặt cùng góc dưới phải, điện thoại đẩy xuống góc
++    // dưới trái cho khỏi chồng lên nút định vị.
++    map.addControl(new lib.ScaleControl({ maxWidth: 88, unit: "metric" }), phone ? "bottom-left" : corner);
++
++    // Giữ lỗi cuối của bản đồ để còn dò được khi có máy báo "bản đồ trắng".
++    map.on("error", (event) => {
++      mapLastError = String(event?.error?.message || event?.error || event || "").slice(0, 240);
++    });
++    map.on("click", () => clearSelection());
++    map.on("zoom", syncMapZoom);
++    // Style có thể nạp lại (đổi nền, mất mạng rồi vào lại) — mỗi lần xong thì
++    // đặt lại ngôn ngữ nhãn cho khớp nút VI | EN.
++    map.on("style.load", () => applyMapLanguage());
++
++    // Chỉ chờ style JSON, không chờ vẽ xong: mạng yếu thì bản đồ hiện ra trước
++    // rồi tự đổ ảnh vào sau, nút bấm không bao giờ treo.
++    await new Promise((resolve) => {
++      let done = false;
++      const finish = () => {
++        if (done) return;
++        done = true;
++        resolve();
++      };
++      if (map.isStyleLoaded()) {
++        finish();
++        return;
++      }
++      map.once("style.load", finish);
++      map.once("load", finish);
++      setTimeout(finish, 9000);
++    });
++
++    mapObj = map;
++    applyMapLanguage();
++    buildMapMarkers();
++    syncMapZoom();
++    syncMapHere();
++    return map;
++  })();
++
++  try {
++    return await mapBooting;
++  } catch (error) {
++    mapBooting = null; // cho phép bấm lại sau khi có mạng
++    throw error;
++  }
++}
++
++/* ---------- Pin trên nền bản đồ thật ---------- */
++
++function buildMapMarkers() {
++  mapMarkers.forEach((marker) => marker.remove());
++  mapMarkers.clear();
++  if (!mapObj || !mapLib) return;
++
++  STARTUPS.forEach((item) => {
++    const pos = realPos(item);
++    const el = document.createElement("button");
++    el.type = "button";
++    el.className = `map-pin map-pin--${STAGE_SLUG[item.stage] || "an"}`;
++    el.dataset.id = item.id;
++    el.dataset.stage = item.stage;
++    if (!hasRealPos(item)) el.classList.add("is-approx");
++    el.innerHTML =
++      `<span class="map-pin__dot"><img class="map-pin__logo" src="${logoPath(item)}" alt="" ` +
++      `data-stage="${escapeHtml(item.stage)}" /></span><span class="map-pin__name"></span>`;
++    el.addEventListener("click", (event) => {
++      event.stopPropagation();
++      selectStartup(item.id);
++    });
++    const marker = new mapLib.Marker({ element: el, anchor: "center" })
++      .setLngLat([pos.lng, pos.lat])
++      .addTo(mapObj);
++    mapMarkers.set(item.id, marker);
++  });
++
++  renderMapPinNames();
++  syncMapMarkers();
++}
++
++function renderMapPinNames() {
++  if (!mapObj) return;
++  mapMarkers.forEach((marker, id) => {
++    const item = STARTUPS.find((s) => s.id === id);
++    const el = marker.getElement();
++    const name = el.querySelector(".map-pin__name");
++    if (!item || !name) return;
++    name.textContent = item.name;
++    const note = hasRealPos(item) ? "" : ` — ${t("mapApprox")}`;
++    el.title = `${item.name} · ${stageLabel(item.stage)}${note}`;
++  });
++}
++
++// Bộ lọc Ăn / Chơi / Ở và điểm đang chọn dùng chung một trạng thái với bản 3D.
++function syncMapMarkers() {
++  if (!mapObj) return;
++  mapMarkers.forEach((marker, id) => {
++    const item = STARTUPS.find((s) => s.id === id);
++    const el = marker.getElement();
++    const on = Boolean(item) && stageAllowed(item);
++    el.classList.toggle("is-off", !on);
++    el.classList.toggle("is-active", on && state.selectedId === id);
++    el.tabIndex = on ? 0 : -1;
++  });
++}
++
++// Xa thì chỉ hiện chấm màu; đủ gần mới bung tên ra, tránh chữ chồng chữ.
++function syncMapZoom() {
++  if (!mapObj || !mapHost) return;
++  // Màn hình điện thoại hẹp nên phải phóng gần hơn mới bung tên, không thì
++  // chữ chồng lên nhau đọc không ra.
++  const from = isPhone() ? 15.2 : 13.4;
++  mapHost.classList.toggle("show-names", mapObj.getZoom() >= from);
++}
++
++function syncMapHere() {
++  if (!mapObj || !mapLib || !userPos) return;
++  if (!mapHere) {
++    const el = document.createElement("div");
++    el.className = "map-here";
++    el.title = t("youAreHere");
++    mapHere = new mapLib.Marker({ element: el }).setLngLat([userPos.lng, userPos.lat]).addTo(mapObj);
++    return;
++  }
++  mapHere.setLngLat([userPos.lng, userPos.lat]);
++}
++
++// Nhãn trên nền bản đồ đổi theo nút VI | EN. OpenStreetMap ghi tên tiếng Việt
++// ở trường `name`, khách nước ngoài thì lấy `name:en` rồi mới đến bản Latin.
++function applyMapLanguage() {
++  if (!mapObj?.isStyleLoaded?.()) return;
++  const field =
++    LANG === "en"
++      ? ["coalesce", ["get", "name:en"], ["get", "name:latin"], ["get", "name"]]
++      : ["coalesce", ["get", "name:vi"], ["get", "name"], ["get", "name:latin"]];
++  const layers = mapObj.getStyle()?.layers || [];
++  layers.forEach((layer) => {
++    if (layer.type !== "symbol" || !layer.layout || !("text-field" in layer.layout)) return;
++    try {
++      mapObj.setLayoutProperty(layer.id, "text-field", field);
++    } catch {
++      /* lớp nào không đổi được thì để nguyên, không chặn cả bản đồ */
++    }
++  });
++}
++
++/* ---------- Bay tới, dùng chung với camera 3D ---------- */
++
++function mapFocusPlace(item, { instant = false } = {}) {
++  if (!mapMode || !mapObj || !mapLib || !item) return;
++  const pos = realPos(item);
++  // Đóng khung một ô ~200 m quanh điểm rồi để fitBounds tự lo phần chừa chỗ
++  // cho HUD — như vậy khung hình không bao giờ rơi vào sau thanh bên.
++  const box = 0.0018;
++  const bounds = new mapLib.LngLatBounds(
++    [pos.lng - box, pos.lat - box],
++    [pos.lng + box, pos.lat + box],
++  );
++  mapObj.fitBounds(bounds, {
++    padding: mapPadding(),
++    maxZoom: 17,
++    duration: instant ? 0 : 900,
++  });
++}
++
++function mapFocusArea(areaId, { instant = false } = {}) {
++  if (!mapMode || !mapObj || !mapLib) return;
++  const items = visibleItems(areaId);
++  if (!items.length) return;
++  const bounds = new mapLib.LngLatBounds();
++  items.forEach((item) => {
++    const pos = realPos(item);
++    bounds.extend([pos.lng, pos.lat]);
++  });
++  const camera = mapObj.cameraForBounds(bounds, { padding: mapPadding(), maxZoom: 15.4 });
++  if (!camera) return;
++  // Vừa khít cả 52 điểm thì trên điện thoại phố xá bé như hạt vừng: ép một mức
++  // phóng tối thiểu để còn đọc được tên đường, ai muốn xem rộng cứ chụm tay ra.
++  const floor = isPhone() ? 12.1 : 11.6;
++  mapObj.easeTo({
++    center: camera.center,
++    zoom: Math.max(camera.zoom, floor),
++    duration: instant ? 0 : 1100,
++  });
++}
++
++/* ---------- Lật qua lại 3D ⇄ bản đồ thật ---------- */
++
++async function setMapMode(next, { silent = false } = {}) {
++  const want = Boolean(next);
++  if (want === mapMode) return;
++  const button = document.querySelector("#mapMode");
++
++  if (want) {
++    if (!mapObj) {
++      button?.classList.add("is-busy");
++      toast(t("mapLoading"), 8000);
++    }
++    try {
++      await loadMap();
++    } catch {
++      button?.classList.remove("is-busy");
++      toast(t("mapFail"), 5200);
++      return;
++    }
++    button?.classList.remove("is-busy");
++  }
++
++  mapMode = want;
++  document.body.classList.toggle("is-map", mapMode);
++  mapHost?.classList.toggle("is-on", mapMode);
++  mapHost?.setAttribute("aria-hidden", mapMode ? "false" : "true");
++  button?.classList.toggle("is-on", mapMode);
+   applyLanguage({ silent: true });
++
++  if (mapMode && mapObj) {
++    mapObj.resize();
++    syncMapMarkers();
++    syncMapHere();
++    const chosen = state.selectedId ? STARTUPS.find((s) => s.id === state.selectedId) : null;
++    if (chosen) mapFocusPlace(chosen, { instant: true });
++    else mapFocusArea(state.activeAreaId, { instant: true });
++    if (!silent) toast(t("mapHint"), 4200);
++  }
++
++  syncModeUrl();
++}
++
++function syncModeUrl() {
++  const params = new URLSearchParams(location.search);
++  if (mapMode) params.set("che-do", "ban-do");
++  else params.delete("che-do");
++  const query = params.toString();
++  history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
+ }
+
++function bootMapMode() {
++  const asked = (QUERY.get("che-do") || QUERY.get("mode") || "").toLowerCase();
++  if (asked === "ban-do" || asked === "map" || asked === "street") setMapMode(true, { silent: true });
++}
++
++// Phím M lật chế độ, trừ khi đang gõ trong ô tìm kiếm.
++window.addEventListener("keydown", (event) => {
++  if (event.key !== "m" && event.key !== "M") return;
++  if (event.metaKey || event.ctrlKey || event.altKey) return;
++  const tag = event.target?.tagName;
++  if (tag === "INPUT" || tag === "TEXTAREA" || event.target?.isContentEditable) return;
++  if (searchModal?.open) return;
++  event.preventDefault();
++  setMapMode(!mapMode);
++});
++
+ /* ---------- Cài về màn hình chính + chạy offline ---------- */
+@@ -4922,2 +5392,3 @@
+   bootWeather();
++  bootMapMode();
+   registerServiceWorker();
+@@ -4940,3 +5411,16 @@
+   selectStartup,
+-  debug: () => ({ lang: LANG, filters: [...activeStages], userPos, viewFit: { ...viewFit } }),
++  setMapMode,
++  get map() {
++    return mapObj;
++  },
++  debug: () => ({
++    lang: LANG,
++    filters: [...activeStages],
++    userPos,
++    viewFit: { ...viewFit },
++    mapMode,
++    mapPins: mapMarkers.size,
++    mapError: mapLastError,
++    realCoords: Object.keys(REAL_COORDS).length,
++  }),
+ };
+##### src/styles.css 31621
+@@ -1374 +1374,199 @@
+ }
++
++/* ==========================================================================
++   BẢN ĐỒ ĐƯỜNG PHỐ THẬT · REAL STREET MAP
++   Nền OpenStreetMap (OpenFreeMap + MapLibre) nằm ngay trên canvas 3D và ngay
++   dưới lớp HUD, nên thanh khu vực, chip lọc, thẻ chi tiết và ô tìm kiếm vẫn
++   dùng được y nguyên khi đã lật sang bản đồ thật.
++   ========================================================================== */
++
++/* Chọn kèm id: maplibre-gl.css nạp sau và cũng đặt position cho .maplibregl-map,
++   nếu chỉ dùng class thì nó đè mất, khung bản đồ tụt về cao 0px. */
++#realMap.real-map {
++  position: absolute;
++  inset: 0;
++  width: 100%;
++  height: 100%;
++  z-index: 1;
++  visibility: hidden;
++  opacity: 0;
++  transition:
++    opacity var(--dur-med) var(--ease-out),
++    visibility var(--dur-med) var(--ease-out);
++}
++
++#realMap.real-map.is-on {
++  visibility: visible;
++  opacity: 1;
++}
++
++/* Khung 3D vẫn nằm đó, chỉ thôi vẽ — bấm quay lại là hiện ngay. */
++body.is-map #scene,
++body.is-map .labels-layer,
++body.is-map .mini-map {
++  visibility: hidden;
++}
++
++body.is-map .atlas-shell::after {
++  opacity: 0;
++}
++
++/* --- Pin: chấm màu theo nhóm, tên bung ra khi phóng đủ gần --- */
++
++/* Vùng bấm đúng bằng cái chấm: tên nằm tuyệt đối bên cạnh nên dù có dài cũng
++   không ăn lấn sang pin bên cạnh. */
++.map-pin {
++  position: relative;
++  display: block;
++  width: 22px;
++  height: 22px;
++  padding: 0;
++  border: 0;
++  background: none;
++  font: inherit;
++  cursor: pointer;
++  -webkit-tap-highlight-color: transparent;
++}
++
++.map-pin.is-off {
++  display: none;
++}
++
++.map-pin--an {
++  --pin: var(--color-warning);
++}
++
++.map-pin--choi {
++  --pin: var(--color-accent-2);
++}
++
++.map-pin--o {
++  --pin: var(--color-success);
++}
++
++.map-pin__dot {
++  display: grid;
++  place-items: center;
++  flex: none;
++  width: 22px;
++  height: 22px;
++  border: 2px solid var(--pin, var(--color-accent));
++  border-radius: 50%;
++  background: oklch(100% 0 0 / 0.95);
++  box-shadow: 0 1px 6px oklch(20% 0.024 258 / 0.34);
++  transition:
++    transform var(--dur-short) var(--ease-out),
++    box-shadow var(--dur-short) var(--ease-out);
++}
++
++.map-pin__logo {
++  width: 14px;
++  height: 14px;
++}
++
++/* Bảy điểm OSM chưa dò được vẫn hiện, nhưng viền đứt để khỏi hiểu nhầm. */
++.map-pin.is-approx .map-pin__dot {
++  border-style: dashed;
++}
++
++.map-pin:hover .map-pin__dot {
++  transform: scale(1.14);
++}
++
++.map-pin.is-active {
++  z-index: 4;
++}
++
++.map-pin.is-active .map-pin__dot {
++  transform: scale(1.28);
++  box-shadow:
++    0 0 0 5px color-mix(in oklch, var(--pin, var(--color-accent)) 32%, transparent),
++    0 2px 9px oklch(20% 0.024 258 / 0.42);
++}
++
++.map-pin__name {
++  position: absolute;
++  top: 50%;
++  left: 27px;
++  max-width: 40vw;
++  padding: 2px 9px;
++  border-radius: 999px;
++  background: oklch(100% 0 0 / 0.92);
++  box-shadow: 0 1px 5px oklch(20% 0.024 258 / 0.22);
++  color: var(--color-ink);
++  font-size: var(--fs-xs);
++  font-weight: 600;
++  white-space: nowrap;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  opacity: 0;
++  transform: translate(-5px, -50%);
++  pointer-events: none;
++  transition:
++    opacity var(--dur-short) var(--ease-out),
++    transform var(--dur-short) var(--ease-out);
++}
++
++.real-map.show-names .map-pin__name,
++.map-pin.is-active .map-pin__name {
++  opacity: 1;
++  transform: translate(0, -50%);
++}
++
++.map-pin.is-active .map-pin__name {
++  background: var(--color-ink);
++  color: oklch(99% 0.003 250);
++}
++
++/* Chấm "bạn đang ở đây", cùng ngôn ngữ với chấm sáng trên bản 3D. */
++.map-here {
++  width: 15px;
++  height: 15px;
++  border: 3px solid oklch(100% 0 0);
++  border-radius: 50%;
++  background: var(--color-accent);
++  box-shadow:
++    0 0 0 6px oklch(58% 0.16 258 / 0.2),
++    0 1px 6px oklch(20% 0.024 258 / 0.4);
++}
++
++/* --- Nút điều khiển của MapLibre, kéo về đúng phong cách HUD kính mờ ---
++   Kèm body.is-map cho đủ độ ưu tiên: maplibre-gl.css nạp sau styles.css nên
++   cùng độ cụ thể là nó thắng. --- */
++
++.maplibregl-ctrl-group {
++  border-radius: 12px !important;
++  background: var(--glass-bg) !important;
++  -webkit-backdrop-filter: var(--glass-blur);
++  backdrop-filter: var(--glass-blur);
++  box-shadow: var(--glass-shadow) !important;
++}
++
++.maplibregl-ctrl-scale {
++  border-color: oklch(20% 0.024 258 / 0.35) !important;
++  background: oklch(100% 0 0 / 0.7) !important;
++  color: var(--color-ink-2) !important;
++  font-family: inherit !important;
++  font-size: var(--fs-xs) !important;
++}
++
++.maplibregl-ctrl-attrib {
++  font-family: inherit !important;
++  font-size: var(--fs-xs) !important;
++}
++
++@media (max-width: 54rem) {
++  /* Trên điện thoại HUD dồn xuống đáy, nên nút định vị lên góc trái trên;
++     thước tỉ lệ và dòng ghi nguồn phải nhấc lên khỏi dải chip. */
++  body.is-map .maplibregl-ctrl-bottom-right {
++    bottom: 148px;
++  }
++
++  body.is-map .maplibregl-ctrl-bottom-left {
++    bottom: 178px;
++  }
++
++  .map-pin__name {
++    max-width: 46vw;
++  }
++}

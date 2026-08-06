@@ -1,0 +1,1939 @@
+/* Hà Nội Atlas · glass HUD (từ NYC AI Atlas)
+   One font (Geist variable), four sizes (24 / 15 / 13 / 11),
+   frosted glass chrome floating over the 3D city. */
+
+@font-face {
+  font-family: "Geist";
+  src: url("/fonts/GeistVF.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  margin: 0;
+  overflow-x: clip;
+}
+
+body {
+  background: var(--color-graphite);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  font-weight: 650;
+}
+
+strong,
+b {
+  font-weight: 600;
+}
+
+button,
+input,
+a {
+  font: inherit;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--color-accent);
+  color: var(--color-accent-ink);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.atlas-shell {
+  position: fixed;
+  inset: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--color-water-deep);
+}
+
+#scene {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+/* Soft cinematic vignette while a company is in focus */
+.atlas-shell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: radial-gradient(
+    ellipse 72% 68% at 50% 46%,
+    transparent 58%,
+    oklch(22% 0.06 258 / 0.34) 100%
+  );
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-long) var(--ease-out);
+}
+
+body.is-focused .atlas-shell::after {
+  opacity: 1;
+}
+
+/* ---------------------------------------------------------------- */
+/* Map labels                                                        */
+/* ---------------------------------------------------------------- */
+
+.labels-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.labels-layer img {
+  -webkit-user-drag: none;
+  user-drag: none;
+}
+
+.marker-label {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  font-weight: 590;
+  gap: 0.4rem;
+  min-height: 28px;
+  max-width: min(16rem, 42vw);
+  padding: 3px 9px 3px 4px;
+  border: 1px solid oklch(100% 0 0 / 0.7);
+  border-radius: 7px;
+  background: oklch(99% 0.003 250 / 0.9);
+  color: var(--color-ink);
+  box-shadow: 0 8px 20px oklch(16% 0.02 258 / 0.16);
+  font-size: var(--fs-sm);
+  line-height: 1.1;
+  white-space: nowrap;
+  transform: translate(-50%, -110%);
+  pointer-events: auto;
+  cursor: pointer;
+  transition:
+    opacity var(--dur-short) var(--ease-out),
+    border-color var(--dur-short) var(--ease-out),
+    background-color var(--dur-short) var(--ease-out),
+    transform var(--dur-short) var(--ease-out);
+  will-change: transform, opacity;
+}
+
+.marker-label__logo {
+  display: block;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  padding: 2px;
+  border: 1px solid var(--color-rule);
+  border-radius: 5px;
+  background: var(--color-paper);
+  object-fit: contain;
+}
+
+.marker-label span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.marker-label small {
+  color: var(--label-color, var(--color-muted));
+  font-size: var(--fs-xs);
+  font-weight: 500;
+}
+
+.marker-label.is-selected,
+.marker-label:hover {
+  border-color: var(--color-accent);
+  background: var(--color-paper);
+  transform: translate(-50%, -118%);
+}
+
+/* Leader line connecting a pushed-up label back down to its pin */
+.marker-label::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 1.5px;
+  height: 0;
+  background: linear-gradient(
+    to bottom,
+    var(--label-color, var(--color-accent)),
+    transparent
+  );
+  opacity: 0;
+  transform: translateX(-50%);
+  transition: opacity var(--dur-short) var(--ease-out);
+  pointer-events: none;
+}
+
+.marker-label.has-leader::after {
+  height: var(--leader, 0);
+  opacity: 0.7;
+}
+
+.marker-label.is-hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.marker-label.is-hidden::after {
+  opacity: 0;
+}
+
+/* A selection dims every other label; out-of-area mute below still wins. */
+.marker-label.is-dimmed {
+  opacity: 0.5;
+}
+
+.marker-label.is-muted {
+  opacity: 0.36;
+}
+
+.context-label {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  font-weight: 550;
+  gap: 0.32rem;
+  max-width: 12rem;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: oklch(18% 0.018 258 / 0.74);
+  color: var(--color-accent-ink);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  transform: translate(-50%, -115%);
+  pointer-events: none;
+}
+
+.landmark-label {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  font-weight: 550;
+  max-width: 9rem;
+  padding: 2px 7px;
+  border: 1px solid oklch(98% 0.004 250 / 0.4);
+  border-radius: 5px;
+  background: oklch(14% 0.018 258 / 0.68);
+  color: var(--color-accent-ink);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  transform: translate(-50%, -115%);
+  pointer-events: none;
+  text-shadow: 0 1px 8px oklch(10% 0.02 258 / 0.4);
+  transition: opacity var(--dur-short) var(--ease-out);
+}
+
+/* ---------------------------------------------------------------- */
+/* Glass HUD chrome                                                  */
+/* ---------------------------------------------------------------- */
+
+.hud-left,
+.hud-top-right,
+.mini-map {
+  position: absolute;
+  z-index: 8;
+}
+
+.rail,
+.detail-card,
+.search-trigger,
+.icon-btn,
+.mini-map,
+.search-modal {
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow);
+}
+
+/* Left column: navigation rail on top, contextual company card below. */
+.hud-left {
+  top: var(--space-md);
+  left: var(--space-md);
+  bottom: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 300px;
+  pointer-events: none;
+}
+
+.hud-left > * {
+  pointer-events: auto;
+}
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: var(--space-md);
+  border-radius: var(--radius-lg);
+  animation: hudInLeft var(--dur-long) var(--ease-out) backwards;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+@keyframes hudInLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+}
+
+@keyframes hudInUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 2px 2px 14px;
+  border-bottom: 1px solid oklch(20% 0.024 258 / 0.1);
+  color: var(--color-ink);
+  text-decoration: none;
+}
+
+.brand__mark {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  color: var(--color-ink);
+}
+
+.brand__text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: var(--fs-xl);
+  line-height: 1;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.brand__sub {
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+}
+
+.area-list {
+  display: grid;
+  gap: 2px;
+  align-content: start;
+  padding: 12px 0;
+  overflow-y: auto;
+  min-height: 0;
+  scrollbar-width: thin;
+}
+
+.area-button {
+  display: grid;
+  grid-template-columns: 24px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 34px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-ink-2);
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-short) var(--ease-out),
+    color var(--dur-short) var(--ease-out),
+    box-shadow var(--dur-short) var(--ease-out);
+}
+
+.area-button:hover {
+  background: oklch(20% 0.024 258 / 0.06);
+  color: var(--color-ink);
+}
+
+/* Area rows already communicate hover/focus with their background. Avoid the
+   global blue outline, which gets clipped by the scrolling rail. */
+.area-button:focus-visible {
+  outline: none;
+  background: oklch(20% 0.024 258 / 0.08);
+}
+
+.area-button:active {
+  transform: translateY(1px);
+}
+
+.area-button__number {
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+}
+
+.area-button__label {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.area-button__count {
+  min-width: 22px;
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+  text-align: right;
+}
+
+.area-button.is-active {
+  background: var(--color-accent-soft);
+  color: var(--color-ink);
+}
+
+.area-button.is-active .area-button__number {
+  color: var(--color-accent);
+}
+
+/* Active area description, inserted right below the selected row. */
+.area-desc {
+  margin: 2px 0 6px;
+  padding: 2px 8px 4px 32px;
+  color: var(--color-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  animation: hudInUp var(--dur-med) var(--ease-out) backwards;
+}
+
+.rail__foot {
+  display: grid;
+  gap: 9px;
+  padding-top: 12px;
+  border-top: 1px solid oklch(20% 0.024 258 / 0.1);
+}
+
+.pin-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+  color: var(--color-ink-2);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+
+.pin-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.pin-legend__item i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.rail__cta {
+  display: grid;
+  grid-template-columns: 16px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  margin-top: 2px;
+  padding: 0 10px;
+  border: 1px solid oklch(20% 0.024 258 / 0.14);
+  border-radius: var(--radius-sm);
+  background: oklch(100% 0 0 / 0.34);
+  color: var(--color-ink-2);
+  font-size: var(--fs-sm);
+  font-weight: 550;
+  text-decoration: none;
+  transition:
+    background-color var(--dur-short) var(--ease-out),
+    border-color var(--dur-short) var(--ease-out),
+    color var(--dur-short) var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.rail__cta svg {
+  width: 16px;
+  height: 16px;
+}
+
+.rail__cta-arrow {
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+  transition: color var(--dur-short) var(--ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .rail__cta:hover {
+    border-color: var(--color-ink);
+    background: var(--color-ink);
+    color: var(--color-accent-ink);
+    transform: translateY(-1px);
+  }
+
+  .rail__cta:hover .rail__cta-arrow {
+    color: var(--color-accent-ink);
+  }
+}
+
+.rail__cta:active {
+  transform: scale(0.98);
+}
+
+.rail__cta:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.rail__hint,
+.rail__credit {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
+.rail__credit a {
+  color: var(--color-ink-2);
+  text-decoration-color: oklch(50% 0.02 258 / 0.5);
+  text-underline-offset: 0.2em;
+}
+
+.rail__credit a:hover {
+  color: var(--color-accent);
+}
+
+kbd {
+  display: inline-grid;
+  font-weight: 500;
+  min-width: 18px;
+  height: 18px;
+  place-items: center;
+  padding-inline: 4px;
+  border: 1px solid oklch(20% 0.024 258 / 0.16);
+  border-radius: 5px;
+  background: oklch(100% 0 0 / 0.55);
+  color: var(--color-ink-2);
+  font-size: var(--fs-xs);
+  line-height: 1;
+}
+
+/* ---------------------------------------------------------------- */
+/* Company detail card (below the rail)                              */
+/* ---------------------------------------------------------------- */
+
+.detail-card {
+  position: relative;
+  flex: 0 0 auto;
+  padding: var(--space-md);
+  border-radius: var(--radius-lg);
+  transition:
+    opacity var(--dur-med) var(--ease-out),
+    transform var(--dur-med) var(--ease-out);
+}
+
+.detail-card.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(8px);
+  position: absolute;
+  visibility: hidden;
+}
+
+.detail-card__close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-muted);
+  font-size: var(--fs-md);
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-short) var(--ease-out),
+    color var(--dur-short) var(--ease-out);
+}
+
+.detail-card__close:hover {
+  background: oklch(20% 0.024 258 / 0.07);
+  color: var(--color-ink);
+}
+
+.detail-card__head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+  padding-right: 26px;
+}
+
+.detail-card__logo {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  padding: 4px;
+  border: 1px solid var(--color-rule);
+  border-radius: 9px;
+  background: var(--color-paper);
+  object-fit: contain;
+}
+
+.detail-card h2 {
+  margin: 0;
+  font-size: var(--fs-xl);
+  line-height: 1.05;
+  overflow-wrap: anywhere;
+}
+
+.detail-card__sector {
+  margin: 3px 0 0;
+  color: var(--color-accent);
+  font-size: var(--fs-xs);
+  font-weight: 550;
+}
+
+.detail-card__blurb {
+  margin: 11px 0 0;
+  color: var(--color-ink-2);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+.detail-card__meta {
+  margin: 9px 0 0;
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
+.detail-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.detail-card__link,
+.detail-card__ghost {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  font-weight: 550;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font-size: var(--fs-sm);
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-short) var(--ease-out),
+    border-color var(--dur-short) var(--ease-out),
+    color var(--dur-short) var(--ease-out),
+    transform var(--dur-short) var(--ease-out);
+}
+
+.detail-card__link {
+  flex: 1 1 100%;
+  border: 1px solid var(--color-accent);
+  color: var(--color-accent);
+}
+
+.detail-card__link:hover {
+  background: var(--color-accent);
+  color: var(--color-accent-ink);
+  transform: translateY(-1px);
+}
+
+.detail-card__ghost {
+  border: 1px solid oklch(20% 0.024 258 / 0.16);
+  color: var(--color-ink-2);
+}
+
+.detail-card__ghost:hover {
+  border-color: var(--color-ink-2);
+  color: var(--color-ink);
+}
+
+/* First-run explore guide, shown in the card slot until dismissed */
+.onboard-title {
+  margin: 0 0 10px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.onboard {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.onboard li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--color-ink-2);
+  font-size: var(--fs-sm);
+}
+
+.onboard__keys {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 3px;
+  min-width: 46px;
+}
+
+.onboard__click {
+  min-width: 46px;
+  font-size: var(--fs-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+
+/* ---------------------------------------------------------------- */
+/* Search trigger + modal                                            */
+/* ---------------------------------------------------------------- */
+
+.hud-top-right {
+  top: var(--space-md);
+  right: var(--space-md);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  animation: hudInUp var(--dur-long) var(--ease-out) 80ms backwards;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.search-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 6px 8px 6px 12px;
+  border-radius: var(--radius-md);
+  color: var(--color-muted);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition:
+    border-color var(--dur-short) var(--ease-out),
+    color var(--dur-short) var(--ease-out);
+}
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-md);
+  color: var(--color-ink-2);
+  cursor: pointer;
+  transition:
+    border-color var(--dur-short) var(--ease-out),
+    color var(--dur-short) var(--ease-out);
+}
+
+.icon-btn svg {
+  width: 19px;
+  height: 19px;
+}
+
+.search-trigger:hover,
+.icon-btn:hover {
+  border-color: var(--color-accent);
+  color: var(--color-ink);
+}
+
+.search-trigger__icon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  color: var(--color-ink-2);
+}
+
+.search-modal {
+  width: min(38rem, calc(100vw - 2rem));
+  max-height: min(72dvh, 40rem);
+  margin: 14vh auto auto;
+  padding: 0;
+  border-radius: var(--radius-lg);
+  background: var(--glass-bg-strong);
+  overflow: hidden;
+  color: var(--color-ink);
+}
+
+.search-modal::backdrop {
+  background: oklch(20% 0.03 258 / 0.4);
+  backdrop-filter: blur(4px);
+}
+
+.search-modal[open] {
+  animation: modalPop var(--dur-med) var(--ease-out);
+}
+
+@keyframes modalPop {
+  from {
+    opacity: 0;
+    transform: translateY(-0.6rem) scale(0.985);
+  }
+}
+
+.search-modal__bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid oklch(20% 0.024 258 / 0.1);
+}
+
+.search-modal__icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  color: var(--color-muted);
+}
+
+.search-modal__bar input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--color-ink);
+  font-size: var(--fs-md);
+}
+
+.search-modal__bar input::placeholder {
+  color: oklch(62% 0.02 258);
+}
+
+.search-modal__bar input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.search-modal__esc {
+  flex: 0 0 auto;
+}
+
+.search-results {
+  max-height: min(56dvh, 30rem);
+  overflow: auto;
+  padding: 8px;
+  scrollbar-width: thin;
+}
+
+.search-results:empty {
+  display: none;
+}
+
+.search-results__cta {
+  display: block;
+  padding: 10px;
+  border-top: 1px solid oklch(20% 0.024 258 / 0.08);
+  color: var(--color-accent);
+  font-size: var(--fs-sm);
+  font-weight: 550;
+  text-align: center;
+  text-decoration: none;
+}
+
+.search-results__cta:hover {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.search-result {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.search-result__logo {
+  width: 28px;
+  height: 28px;
+  padding: 3px;
+  border: 1px solid var(--color-rule);
+  border-radius: 7px;
+  background: var(--color-paper);
+  object-fit: contain;
+}
+
+.search-result__body {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.search-result strong {
+  overflow: hidden;
+  font-size: var(--fs-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-result__body > span {
+  overflow: hidden;
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-result.is-active,
+.search-result:hover:not([disabled]) {
+  background: oklch(20% 0.024 258 / 0.06);
+}
+
+.search-result.is-active {
+  border-color: var(--color-accent);
+}
+
+.search-result:active {
+  transform: translateY(1px);
+}
+
+/* ---------------------------------------------------------------- */
+/* Mini map                                                          */
+/* ---------------------------------------------------------------- */
+
+.mini-map {
+  right: var(--space-md);
+  bottom: var(--space-md);
+  display: grid;
+  gap: 4px;
+  width: 118px;
+  padding: 10px;
+  border-radius: var(--radius-md);
+  animation: hudInUp var(--dur-long) var(--ease-out) 160ms backwards;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.mini-map svg {
+  width: 100%;
+  height: auto;
+}
+
+.mini-map__land,
+.mini-map__brooklyn {
+  fill: oklch(89% 0.028 92);
+  stroke: var(--color-ink-2);
+  stroke-width: 2;
+}
+
+.mini-map__brooklyn {
+  fill: oklch(84% 0.032 102);
+}
+
+.mini-point {
+  fill: var(--color-accent);
+  opacity: 0.5;
+}
+
+.mini-point.is-active {
+  fill: var(--color-danger);
+  opacity: 1;
+}
+
+.mini-map p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.14em;
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------- */
+/* Responsive                                                        */
+/* ---------------------------------------------------------------- */
+
+/* Touch layout: rail collapses into a bottom sheet with an area chip row;
+   the company card slides in as a sheet above it. */
+@media (max-width: 54rem) {
+  .hud-left {
+    top: auto;
+    left: var(--space-xs);
+    right: var(--space-xs);
+    bottom: var(--space-xs);
+    width: auto;
+    gap: 8px;
+  }
+
+  .rail {
+    padding: 10px 12px;
+  }
+
+  .brand {
+    gap: 8px;
+    padding: 0 0 8px;
+  }
+
+  .brand__mark {
+    width: 22px;
+    height: 22px;
+  }
+
+  .brand h1 {
+    font-size: var(--fs-md);
+  }
+
+  .brand__sub {
+    display: none;
+  }
+
+  .area-list {
+    display: flex;
+    gap: 6px;
+    padding: 8px 0 2px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+
+  .area-list::-webkit-scrollbar {
+    display: none;
+  }
+
+  .area-button {
+    display: inline-flex;
+    flex: 0 0 auto;
+    width: auto;
+    align-items: center;
+    gap: 6px;
+    min-height: 30px;
+    padding: 4px 12px;
+    border: 1px solid oklch(20% 0.024 258 / 0.14);
+    border-radius: 999px;
+  }
+
+  .area-button__number {
+    display: none;
+  }
+
+  .area-button__count {
+    min-width: 0;
+  }
+
+  .area-button.is-active {
+    box-shadow: none;
+    border-color: var(--color-accent);
+  }
+
+  .area-desc,
+  .rail__foot,
+  .mini-map,
+  .search-trigger__label,
+  .search-trigger kbd,
+  .detail-card.is-onboard {
+    display: none;
+  }
+
+  .detail-card {
+    order: -1;
+    max-height: 44dvh;
+    overflow: auto;
+  }
+
+  .search-trigger {
+    padding: 6px 10px;
+  }
+
+  .marker-label {
+    max-width: 52vw;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+/* ==========================================================================
+   TIỆN ÍCH HẰNG NGÀY · EVERYDAY TOOLS
+   Chip lọc nhóm, nút VI|EN + Gần tôi, thanh thông báo, khoảng cách,
+   và bố cục điện thoại. Nối sau styles.css gốc nên các quy tắc ở đây
+   ghi đè phần tương ứng phía trên.
+   ========================================================================== */
+
+.pin-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 0 0;
+  color: var(--color-ink-2);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+
+.pin-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 3px 10px;
+  border: 1px solid oklch(20% 0.024 258 / 0.14);
+  border-radius: 999px;
+  background: oklch(100% 0 0 / 0.34);
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-short) var(--ease-out),
+    border-color var(--dur-short) var(--ease-out),
+    opacity var(--dur-short) var(--ease-out);
+}
+
+.pin-legend__item[aria-pressed="true"] {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  font-weight: 600;
+}
+
+.pin-legend__item.is-off {
+  opacity: 0.4;
+}
+
+.pin-legend__item b {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  opacity: 0.55;
+}
+
+.pin-legend__item i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+/* HUD tool buttons: language switch and locate-me. */
+.tool-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow);
+  color: var(--color-ink);
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-short) var(--ease-out),
+    color var(--dur-short) var(--ease-out);
+}
+
+.tool-btn svg {
+  width: 17px;
+  height: 17px;
+  flex: none;
+}
+
+.tool-btn.is-on {
+  color: var(--color-accent);
+}
+
+.tool-btn.is-busy {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.tool-btn.is-busy svg {
+  animation: toolSpin 1s linear infinite;
+}
+
+@keyframes toolSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Status line for locating, filters and offline hints. */
+.atlas-toast {
+  position: fixed;
+  left: 50%;
+  bottom: max(18px, env(safe-area-inset-bottom));
+  z-index: 30;
+  max-width: min(30rem, calc(100vw - 32px));
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: oklch(20% 0.024 258 / 0.9);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  color: oklch(99% 0.003 250);
+  font-size: var(--fs-sm);
+  text-align: center;
+  opacity: 0;
+  transform: translate(-50%, 12px);
+  pointer-events: none;
+  transition:
+    opacity var(--dur-med) var(--ease-out),
+    transform var(--dur-med) var(--ease-out);
+}
+
+.atlas-toast.is-on {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+/* Distance / opening-hours chips on the detail card. */
+.detail-card__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 2px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.chip--near {
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+}
+
+.chip--open {
+  background: oklch(58% 0.14 155 / 0.14);
+  color: oklch(44% 0.13 155);
+}
+
+.chip--shut {
+  background: oklch(50% 0.02 258 / 0.14);
+  color: var(--color-muted);
+}
+
+.search-results__head {
+  margin: 2px 4px 6px;
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.search-result {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.search-result__dist {
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+@media (max-width: 54rem) {
+  .tool-btn__label {
+    display: none;
+  }
+
+  /* Category filter stays reachable on phones, as a compact chip row. */
+  .pin-legend {
+    gap: 6px;
+    padding: 8px 0 0;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    scrollbar-width: none;
+  }
+
+  .pin-legend::-webkit-scrollbar {
+    display: none;
+  }
+
+  .pin-legend__item {
+    flex: 0 0 auto;
+  }
+
+  .tool-btn {
+    min-width: 38px;
+    padding: 0 10px;
+    justify-content: center;
+  }
+
+  /* Narrower, lighter labels so more pins fit side by side on a phone. */
+  .marker-label {
+    max-width: 43vw;
+    min-height: 26px;
+    gap: 0.3rem;
+    padding: 2px 7px 2px 3px;
+    font-size: var(--fs-xs);
+  }
+
+  .marker-label__logo {
+    width: 18px;
+    height: 18px;
+  }
+
+  .marker-label small {
+    display: none;
+  }
+}
+
+/* ==========================================================================
+   BẢN ĐỒ ĐƯỜNG PHỐ THẬT · REAL STREET MAP
+   Nền OpenStreetMap (OpenFreeMap + MapLibre) nằm ngay trên canvas 3D và ngay
+   dưới lớp HUD, nên thanh khu vực, chip lọc, thẻ chi tiết và ô tìm kiếm vẫn
+   dùng được y nguyên khi đã lật sang bản đồ thật.
+   ========================================================================== */
+
+/* Chọn kèm id: maplibre-gl.css nạp sau và cũng đặt position cho .maplibregl-map,
+   nếu chỉ dùng class thì nó đè mất, khung bản đồ tụt về cao 0px. */
+#realMap.real-map {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  visibility: hidden;
+  opacity: 0;
+  transition:
+    opacity var(--dur-med) var(--ease-out),
+    visibility var(--dur-med) var(--ease-out);
+}
+
+#realMap.real-map.is-on {
+  visibility: visible;
+  opacity: 1;
+}
+
+/* Khung 3D vẫn nằm đó, chỉ thôi vẽ — bấm quay lại là hiện ngay. */
+body.is-map #scene,
+body.is-map .labels-layer,
+body.is-map .mini-map {
+  visibility: hidden;
+}
+
+body.is-map .atlas-shell::after {
+  opacity: 0;
+}
+
+/* --- Pin: chấm màu theo nhóm, tên bung ra khi phóng đủ gần --- */
+
+/* Vùng bấm đúng bằng cái chấm: tên nằm tuyệt đối bên cạnh nên dù có dài cũng
+   không ăn lấn sang pin bên cạnh. */
+.map-pin {
+  position: relative;
+  display: block;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.map-pin.is-off {
+  display: none;
+}
+
+.map-pin--an {
+  --pin: var(--color-warning);
+}
+
+.map-pin--choi {
+  --pin: var(--color-accent-2);
+}
+
+.map-pin--o {
+  --pin: var(--color-success);
+}
+
+.map-pin__dot {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--pin, var(--color-accent));
+  border-radius: 50%;
+  background: oklch(100% 0 0 / 0.95);
+  box-shadow: 0 1px 6px oklch(20% 0.024 258 / 0.34);
+  transition:
+    transform var(--dur-short) var(--ease-out),
+    box-shadow var(--dur-short) var(--ease-out);
+}
+
+.map-pin__logo {
+  width: 14px;
+  height: 14px;
+}
+
+/* Bảy điểm OSM chưa dò được vẫn hiện, nhưng viền đứt để khỏi hiểu nhầm. */
+.map-pin.is-approx .map-pin__dot {
+  border-style: dashed;
+}
+
+.map-pin:hover .map-pin__dot {
+  transform: scale(1.14);
+}
+
+.map-pin.is-active {
+  z-index: 4;
+}
+
+.map-pin.is-active .map-pin__dot {
+  transform: scale(1.28);
+  box-shadow:
+    0 0 0 5px color-mix(in oklch, var(--pin, var(--color-accent)) 32%, transparent),
+    0 2px 9px oklch(20% 0.024 258 / 0.42);
+}
+
+.map-pin__name {
+  position: absolute;
+  top: 50%;
+  left: 27px;
+  max-width: 40vw;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: oklch(100% 0 0 / 0.92);
+  box-shadow: 0 1px 5px oklch(20% 0.024 258 / 0.22);
+  color: var(--color-ink);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  transform: translate(-5px, -50%);
+  pointer-events: none;
+  transition:
+    opacity var(--dur-short) var(--ease-out),
+    transform var(--dur-short) var(--ease-out);
+}
+
+.real-map.show-names .map-pin__name,
+.map-pin.is-active .map-pin__name {
+  opacity: 1;
+  transform: translate(0, -50%);
+}
+
+.map-pin.is-active .map-pin__name {
+  background: var(--color-ink);
+  color: oklch(99% 0.003 250);
+}
+
+/* Chấm "bạn đang ở đây", cùng ngôn ngữ với chấm sáng trên bản 3D. */
+.map-here {
+  width: 15px;
+  height: 15px;
+  border: 3px solid oklch(100% 0 0);
+  border-radius: 50%;
+  background: var(--color-accent);
+  box-shadow:
+    0 0 0 6px oklch(58% 0.16 258 / 0.2),
+    0 1px 6px oklch(20% 0.024 258 / 0.4);
+}
+
+/* --- Nút điều khiển của MapLibre, kéo về đúng phong cách HUD kính mờ ---
+   Kèm body.is-map cho đủ độ ưu tiên: maplibre-gl.css nạp sau styles.css nên
+   cùng độ cụ thể là nó thắng. --- */
+
+.maplibregl-ctrl-group {
+  border-radius: 12px !important;
+  background: var(--glass-bg) !important;
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow) !important;
+}
+
+.maplibregl-ctrl-scale {
+  border-color: oklch(20% 0.024 258 / 0.35) !important;
+  background: oklch(100% 0 0 / 0.7) !important;
+  color: var(--color-ink-2) !important;
+  font-family: inherit !important;
+  font-size: var(--fs-xs) !important;
+}
+
+.maplibregl-ctrl-attrib {
+  font-family: inherit !important;
+  font-size: var(--fs-xs) !important;
+}
+
+@media (max-width: 54rem) {
+  /* Trên điện thoại HUD dồn xuống đáy, nên nút định vị lên góc trái trên;
+     thước tỉ lệ và dòng ghi nguồn phải nhấc lên khỏi dải chip. */
+  body.is-map .maplibregl-ctrl-bottom-right {
+    bottom: 148px;
+  }
+
+  body.is-map .maplibregl-ctrl-bottom-left {
+    bottom: 178px;
+  }
+
+  .map-pin__name {
+    max-width: 46vw;
+  }
+}
+
+/* ==========================================================================
+   BẢNG NGUỒN & ĐỐI CHIẾU · SOURCES SHEET
+   Người dùng bấm là ra danh sách văn bản gốc, mỗi cái một link mở thẳng.
+   ========================================================================== */
+
+.src-sheet {
+  width: min(46rem, calc(100vw - 24px));
+  max-height: min(84vh, 52rem);
+  padding: var(--space-lg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-paper);
+  color: var(--color-ink);
+  box-shadow: var(--glass-shadow);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.src-sheet::backdrop {
+  background: oklch(20% 0.024 258 / 0.5);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+}
+
+.src-sheet__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
+.src-sheet__head h2 {
+  margin: 0;
+  font-size: var(--fs-xl);
+}
+
+.src-sheet__checked {
+  margin: 2px 0 0;
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.src-sheet__close {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--color-rule);
+  border-radius: 50%;
+  background: var(--color-paper-2);
+  color: var(--color-ink-2);
+  cursor: pointer;
+}
+
+.src-sheet__lead {
+  margin: var(--space-sm) 0 0;
+  color: var(--color-ink-2);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+}
+
+.src-sheet__stale {
+  margin: var(--space-sm) 0 0;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: oklch(70% 0.15 84 / 0.16);
+  color: oklch(42% 0.12 60);
+  font-size: var(--fs-sm);
+}
+
+.src-sheet__group {
+  margin: var(--space-lg) 0 var(--space-xs);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--color-rule);
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.src-card {
+  padding: var(--space-sm) 0;
+  border-bottom: 1px solid oklch(88% 0.012 252 / 0.6);
+}
+
+.src-card:last-of-type {
+  border-bottom: 0;
+}
+
+.src-card__ref {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--color-ink-2);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.src-card__kind {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.src-card h3 {
+  margin: 4px 0 2px;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.src-card__meta {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+}
+
+.src-card__use {
+  margin: 6px 0 0;
+  color: var(--color-ink-2);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+
+.src-card__note {
+  margin: 6px 0 0;
+  padding: 8px 11px;
+  border-left: 3px solid var(--color-accent-2);
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  background: var(--color-paper-2);
+  color: var(--color-ink-2);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+
+.src-card__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  color: var(--color-accent);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.src-card__link:hover {
+  text-decoration: underline;
+}
+
+/* Mục chưa có văn bản: viền đứt, cùng ngôn ngữ với pin toạ độ ước lượng. */
+.src-card--gap {
+  margin-top: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px dashed oklch(50% 0.02 258 / 0.45);
+  border-radius: var(--radius-sm);
+  background: var(--color-paper-2);
+}
+
+.src-card--gap h3 {
+  margin-top: 0;
+}
+
+@media (max-width: 54rem) {
+  .src-sheet {
+    width: calc(100vw - 16px);
+    max-height: 86vh;
+    padding: var(--space-md);
+  }
+}
+
+/* ==========================================================================
+   LỚP VÙNG PHÁT THẢI THẤP + TRẠM SẠC · LEZ & CHARGING LAYERS
+   ========================================================================== */
+
+/* Khi bảng ghi chú lớp mở ra, danh sách khu vực vẫn phải còn chỗ đứng —
+   nó cuộn bên trong chứ không được ép xuống 0. */
+@media (min-width: 54.01rem) {
+  body.is-map .area-list {
+    min-height: 9rem;
+  }
+}
+
+.map-layers {
+  display: none;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 0 0;
+  margin-top: 8px;
+  border-top: 1px solid oklch(20% 0.024 258 / 0.1);
+}
+
+body.is-map .map-layers {
+  display: flex;
+}
+
+.map-layers__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 3px 10px;
+  border: 1px solid oklch(20% 0.024 258 / 0.14);
+  border-radius: 999px;
+  background: oklch(100% 0 0 / 0.34);
+  color: var(--color-ink-2);
+  font: inherit;
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-short) var(--ease-out),
+    border-color var(--dur-short) var(--ease-out);
+}
+
+.map-layers__item i {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: var(--tone, var(--color-accent));
+}
+
+/* Nét đứt trên chip nhắc lại nét đứt trên bản đồ: ranh giới chỉ chỗ. */
+.map-layers__item--lez {
+  --tone: #b3651a;
+}
+
+.map-layers__item--lez i {
+  border: 1.5px dashed #b3651a;
+  background: oklch(70% 0.15 60 / 0.28);
+}
+
+.map-layers__item--charge {
+  --tone: #1f7a4d;
+}
+
+.map-layers__item--charge i {
+  border-radius: 50%;
+}
+
+.map-layers__item[aria-pressed="true"] {
+  border-color: var(--tone);
+  background: color-mix(in oklch, var(--tone) 14%, transparent);
+  color: var(--color-ink);
+  font-weight: 600;
+}
+
+/* Ghi chú giải thích lớp: nằm dưới thẻ chi tiết trong cột trái. */
+.map-note {
+  flex: 0 1 auto;
+  min-height: 0;
+  /* Chặn chiều cao để thanh khu vực phía trên không bị ép mất. */
+  max-height: 32vh;
+  padding: var(--space-md);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow);
+  color: var(--color-ink-2);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  overflow-y: auto;
+  animation: hudInUp var(--dur-med) var(--ease-out) backwards;
+}
+
+.map-note__block + .map-note__block {
+  margin-top: var(--space-md);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--color-rule);
+}
+
+.map-note h3 {
+  margin: 0 0 2px;
+  color: var(--color-ink);
+  font-size: var(--fs-md);
+}
+
+.map-note p {
+  margin: 6px 0 0;
+}
+
+.map-note__when {
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Cảnh báo hiểu nhầm: đây là chỗ dễ làm người ta đi sai nhất. */
+.map-note__warn {
+  padding: 8px 11px;
+  border-left: 3px solid oklch(70% 0.15 60);
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  background: oklch(70% 0.15 84 / 0.14);
+  color: oklch(38% 0.11 55);
+}
+
+/* Chỗ chưa có văn bản: viền đứt, cùng ngôn ngữ với pin toạ độ ước lượng. */
+.map-note__gap {
+  padding: 8px 11px;
+  border: 1px dashed oklch(50% 0.02 258 / 0.45);
+  border-radius: var(--radius-xs);
+  background: var(--color-paper-2);
+}
+
+.map-note__next {
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+}
+
+.map-note__srcs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+}
+
+.map-note__src {
+  color: var(--color-accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.map-note__src:hover {
+  text-decoration: underline;
+}
+
+.chip--lez {
+  border: 1px dashed oklch(55% 0.13 55 / 0.6);
+  background: oklch(70% 0.15 84 / 0.16);
+  color: oklch(38% 0.11 55);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+@media (max-width: 54rem) {
+  .map-note {
+    max-height: 38vh;
+  }
+
+  .map-layers {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .map-layers::-webkit-scrollbar {
+    display: none;
+  }
+
+  .map-layers__item {
+    flex: 0 0 auto;
+  }
+}

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Cột cờ Hà Nội">
+  <rect width="64" height="64" rx="14" fill="#1fa99b"/>
+  <g fill="#ffffff">
+    <path d="M14 46l8-30 3 .8-2.2 8.2H46l-6 8 6 8H21.4L18 47Z"/>
+    <rect x="12" y="48" width="20" height="5" rx="2"/></g>
+</svg>

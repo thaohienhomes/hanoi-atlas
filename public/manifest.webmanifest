@@ -1,0 +1,19 @@
+{
+  "name": "Hà Nội Atlas",
+  "short_name": "Hà Nội Atlas",
+  "description": "Bản đồ 3D Hà Nội: ẩm thực, du lịch và bất động sản. A 3D map of Hanoi's food, sights and homes.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#cfe6f2",
+  "theme_color": "#0b1017",
+  "lang": "vi",
+  "categories": ["travel", "food", "maps", "navigation"],
+  "icons": [
+    { "src": "./icon-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "./icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "./icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

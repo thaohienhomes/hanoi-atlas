@@ -1,0 +1,556 @@
+##### src/main.js 230771
+@@ -3107,2 +3107,3 @@
+     .join(" · ");
++  const lezWard = lezWardOf(startup);
+   const away = distanceTo(startup);
+@@ -3120,4 +3121,4 @@
+     ${
+-      away || open
+-        ? `<p class="detail-card__chips">${away ? `<span class="chip chip--near">${escapeHtml(t("away").replace("{d}", away))}</span>` : ""}${open ? `<span class="chip chip--${open.open ? "open" : "shut"}">${escapeHtml(open.text)}</span>` : ""}</p>`
++      away || open || lezWard
++        ? `<p class="detail-card__chips">${away ? `<span class="chip chip--near">${escapeHtml(t("away").replace("{d}", away))}</span>` : ""}${open ? `<span class="chip chip--${open.open ? "open" : "shut"}">${escapeHtml(open.text)}</span>` : ""}${lezWard ? `<button class="chip chip--lez" type="button" data-lez title="${escapeHtml(t("lezWarn"))}">${escapeHtml(t("lezInZone"))} · ${escapeHtml(lezWard)}</button>` : ""}</p>`
+         : ""
+@@ -3133,2 +3134,9 @@
+   `;
++  const lezChip = detailCard.querySelector("[data-lez]");
++  if (lezChip) {
++    lezChip.addEventListener("click", () => {
++      if (!mapLayerState.lez) toggleMapLayer("lez");
++      else openLezNote();
++    });
++  }
+   const closeBtn = detailCard.querySelector(".detail-card__close");
+@@ -4282,2 +4290,20 @@
+     srcClose: "Đóng",
++    layers: "Lớp dữ liệu",
++    lezName: "Vùng phát thải thấp",
++    lezOn: "Hiện ranh giới 9 phường có vùng phát thải thấp",
++    chargeName: "Trạm sạc",
++    chargeOn: "Hiện {n} trạm sạc xe điện lấy từ OpenStreetMap",
++    lezTitle: "Vùng phát thải thấp",
++    lezWhen: "Thí điểm từ 01/7/2026 đến 31/12/2027",
++    lezWhere: "Trong Vành đai 1, thuộc 9 phường: Hai Bà Trưng, Cửa Nam, Hoàn Kiếm, Ô Chợ Dừa, Văn Miếu – Quốc Tử Giám, Ba Đình, Giảng Võ, Ngọc Hà, Tây Hồ.",
++    lezWarn: "Đường kẻ trên bản đồ là ranh giới PHƯỜNG, không phải ranh giới vùng cấm. Vùng thí điểm chỉ là một số khu vực bên trong. Đừng dùng thay biển báo ngoài đường.",
++    lezWhat: "Cấm hẳn: xe tải trên 3.500 kg chạy nhiên liệu hoá thạch; xe máy xăng chạy dịch vụ qua ứng dụng; ô tô nhiên liệu hoá thạch không đạt mức 4. Hạn chế theo khung giờ: xe máy xăng và ô tô chưa đạt chuẩn.",
++    lezHours: "Khung giờ cấm: chưa công bố",
++    lezHoursWhy: "Nghị quyết không ấn định giờ, chờ đề án của UBND thành phố. Bản đồ sẽ không hiện giờ nào cho tới khi có văn bản.",
++    lezNext: "Mốc tiếp theo: 01/01/2028 mở ra Vành đai 1–2, từ 2030 tới Vành đai 3.",
++    lezInZone: "Trong 9 phường có vùng phát thải thấp",
++    chargeTitle: "Trạm sạc xe điện",
++    chargeCount: "{n} trạm trong khung Hà Nội, {v} của VinFast.",
++    chargeWarn: "OpenStreetMap do cộng đồng đóng góp nên có thể thiếu hoặc cũ, và hầu như không ghi trạm nào nhận xe máy điện. Nên gọi trước khi đi xa.",
++    srcSee: "Xem văn bản gốc",
+   },
+@@ -4377,2 +4403,20 @@
+     srcClose: "Close",
++    layers: "Data layers",
++    lezName: "Low-emission zone",
++    lezOn: "Show the nine wards that contain the low-emission zone",
++    chargeName: "EV charging",
++    chargeOn: "Show {n} charging points from OpenStreetMap",
++    lezTitle: "Low-emission zone",
++    lezWhen: "Pilot from 1 Jul 2026 to 31 Dec 2027",
++    lezWhere: "Inside Ring Road 1, across nine wards: Hai Bà Trưng, Cửa Nam, Hoàn Kiếm, Ô Chợ Dừa, Văn Miếu – Quốc Tử Giám, Ba Đình, Giảng Võ, Ngọc Hà, Tây Hồ.",
++    lezWarn: "The outline on the map is the WARD boundary, not the restricted area. The pilot covers only parts of it. Do not use this instead of the signs on the street.",
++    lezWhat: "Banned outright: fossil-fuel trucks over 3,500 kg; petrol motorbikes on ride-hailing apps; fossil-fuel cars below emission level 4. Time-restricted: petrol motorbikes and cars that miss the standard.",
++    lezHours: "Restricted hours: not yet published",
++    lezHoursWhy: "The resolution sets no hours; they await the city government's scheme. The map will show none until a document exists.",
++    lezNext: "Next milestones: 1 Jan 2028 out to Ring Roads 1–2, then Ring Road 3 from 2030.",
++    lezInZone: "In a low-emission-zone ward",
++    chargeTitle: "EV charging points",
++    chargeCount: "{n} points inside the Hanoi frame, {v} of them VinFast.",
++    chargeWarn: "OpenStreetMap is community-mapped, so it can be incomplete or stale, and almost none of these record whether they take electric motorbikes. Call ahead before a long trip.",
++    srcSee: "Read the document",
+   },
+@@ -4495,2 +4539,4 @@
+   renderMapPinNames();
++  renderMapLayerChips();
++  renderMapNote();
+
+@@ -5179,3 +5225,6 @@
+     // đặt lại ngôn ngữ nhãn cho khớp nút VI | EN.
+-    map.on("style.load", () => applyMapLanguage());
++    map.on("style.load", () => {
++      applyMapLanguage();
++      syncMapLayers();
++    });
+
+@@ -5381,2 +5430,3 @@
+   applyLanguage({ silent: true });
++  renderMapNote();
+
+@@ -5386,2 +5436,3 @@
+     syncMapHere();
++    syncMapLayers();
+     const chosen = state.selectedId ? STARTUPS.find((s) => s.id === state.selectedId) : null;
+@@ -5720,2 +5771,269 @@
+
++/* ==========================================================================
++   LỚP VÙNG PHÁT THẢI THẤP + TRẠM SẠC · LOW-EMISSION ZONE & EV CHARGING
++   Chồng lên nền bản đồ đường phố thật. Hai lớp này nói về quy định thật ngoài
++   đường nên phải khai nguồn (registerLayer) và phải nói rõ giới hạn của mình:
++   đường kẻ là ranh giới PHƯỜNG, vùng thí điểm chỉ là một phần bên trong, và
++   khung giờ cấm thì chưa có văn bản nào công bố nên bản đồ không hiện giờ.
++   ========================================================================== */
++
++// Ranh giới 9 phường có vùng phát thải thấp, lấy từ OpenStreetMap
++// (admin_level=6, mức phường sau sáp nhập 2025) rồi rút gọn Douglas–Peucker
++// ngưỡng 25 m: 756 xuống 171 đỉnh, lệch tối đa 28 m so với ranh giới gốc.
++// Đủ đúng để chỉ chỗ ở mức phóng người ta dùng, và dù sao đây cũng không
++// phải bản đồ pháp lý.
++const LEZ_WARDS = [
++  ["Hoàn Kiếm", [[21.0349,105.8549],[21.0279,105.8583],[21.025,105.8602],[21.0244,105.8569],[21.028,105.8442],[21.0291,105.8426],[21.0342,105.8437],[21.0341,105.8448],[21.0349,105.8449],[21.0351,105.8439],[21.0394,105.8447],[21.0392,105.8454],[21.04,105.8456],[21.0398,105.8468],[21.0408,105.8501],[21.0349,105.8549]]],
++  ["Ba Đình", [[21.0289,105.8416],[21.0283,105.8416],[21.0291,105.8426],[21.0342,105.8437],[21.0341,105.8448],[21.0349,105.8449],[21.0351,105.8439],[21.0394,105.8447],[21.0392,105.8454],[21.04,105.8456],[21.0398,105.8468],[21.0408,105.8501],[21.0506,105.8402],[21.0501,105.8394],[21.0473,105.8379],[21.0468,105.8367],[21.0439,105.8362],[21.0428,105.8358],[21.0428,105.8353],[21.0418,105.8353],[21.0416,105.8307],[21.0396,105.8287],[21.0397,105.8274],[21.0373,105.8266],[21.0371,105.8284],[21.0347,105.828],[21.0347,105.8272],[21.0321,105.827],[21.0325,105.829],[21.0289,105.8416]]],
++  ["Cửa Nam", [[21.027,105.8478],[21.0244,105.8569],[21.025,105.8602],[21.0185,105.862],[21.0184,105.8609],[21.019,105.8587],[21.0179,105.8542],[21.019,105.8477],[21.0207,105.8414],[21.0283,105.8416],[21.0291,105.8426],[21.0284,105.8433],[21.027,105.8478]]],
++  ["Hai Bà Trưng", [[21.0087,105.8633],[21.0092,105.8562],[21.0077,105.8414],[21.0207,105.8414],[21.019,105.8477],[21.0179,105.8542],[21.019,105.8587],[21.0184,105.8609],[21.0185,105.862],[21.0122,105.8636],[21.0103,105.8645],[21.0088,105.8659],[21.0087,105.8633]]],
++  ["Văn Miếu - Quốc Tử Giám", [[21.0304,105.8361],[21.0289,105.8416],[21.0077,105.8414],[21.0082,105.8397],[21.0089,105.8389],[21.016,105.8324],[21.0182,105.8297],[21.0278,105.8342],[21.0304,105.8361]]],
++  ["Ô Chợ Dừa", [[21.0305,105.8358],[21.0322,105.83],[21.0313,105.8297],[21.0277,105.8248],[21.0234,105.8198],[21.0166,105.8149],[21.0139,105.8188],[21.0161,105.8209],[21.0167,105.8235],[21.0208,105.8257],[21.0182,105.8297],[21.0278,105.8342],[21.0304,105.8361],[21.0305,105.8358]]],
++  ["Giảng Võ", [[21.0302,105.8013],[21.0286,105.8042],[21.0274,105.8093],[21.025,105.8113],[21.0199,105.8082],[21.0166,105.8149],[21.0234,105.8198],[21.0277,105.8248],[21.0313,105.8297],[21.0322,105.83],[21.0325,105.829],[21.0306,105.8159],[21.0313,105.8133],[21.0339,105.814],[21.0355,105.8088],[21.0362,105.8083],[21.0371,105.8063],[21.0328,105.8037],[21.0302,105.8013]]],
++  ["Ngọc Hà", [[21.0397,105.8274],[21.0373,105.8266],[21.0371,105.8284],[21.0347,105.828],[21.0347,105.8272],[21.0321,105.827],[21.0306,105.8165],[21.0313,105.8133],[21.0339,105.814],[21.0355,105.8088],[21.0362,105.8083],[21.0371,105.8063],[21.0401,105.8062],[21.0403,105.8069],[21.0414,105.8065],[21.0454,105.8061],[21.048,105.8051],[21.0476,105.8056],[21.0478,105.8061],[21.0473,105.8082],[21.0464,105.8105],[21.0427,105.8152],[21.0418,105.8219],[21.0397,105.8274]]],
++  ["Tây Hồ", [[21.0578,105.8352],[21.0531,105.8378],[21.0506,105.8402],[21.0501,105.8394],[21.0473,105.8379],[21.0468,105.8367],[21.0439,105.8362],[21.0428,105.8358],[21.0428,105.8353],[21.0418,105.8353],[21.0416,105.8307],[21.0395,105.8286],[21.0418,105.8219],[21.0427,105.8152],[21.0464,105.8105],[21.0473,105.8082],[21.0478,105.8061],[21.0476,105.8056],[21.048,105.8051],[21.0515,105.8045],[21.0622,105.8045],[21.0686,105.8081],[21.0761,105.8114],[21.0846,105.8167],[21.082,105.8176],[21.0774,105.8206],[21.0727,105.8257],[21.0681,105.8265],[21.0648,105.8292],[21.0646,105.8308],[21.0641,105.8316],[21.061,105.8328],[21.0578,105.8352]]],
++];
++
++// Trạm sạc xe điện từ OpenStreetMap (amenity=charging_station), gom về lưới
++// ~11 m và mã hoá delta cho gọn: mỗi điểm là "dlat,dlng,vinfast" tính theo
++// đơn vị 1e-4 độ, cộng dồn từ điểm trước.
++const CHARGE_PACKED =
++  "208577,1058697,1 306,-733,1 411,-116,1 6,-72,1 1,108,1 4,-36,1 18,656,1 1,-657,1 7,666,1 3,-596,1 4,-71,1 92,2362,0 1,0,0 0,1,0 1,0,0 28,-399,0 1,-1518,1 0,1518,0 0,1,0 0,1,0 22,11,1 1,0,0 1,-1,0 0,1,0 1,-1,0 1,-1290,1 0,1290,0 1,-1,0 1,0,0 1,-1,0 1,0,0 1,-1,0 14,-1284,1 20,-1020,1 43,50,1 33,-147,1 4,-11,1 6,1192,1 17,-1006,1 1,854,1 2,0,1 8,-207,1 0,205,1 1,1,1 2,-226,1 5,313,1 10,-975,0 10,141,1 12,227,1 24,855,1 0,1685,1 6,-1676,1 15,-20,1 3,-377,1 4,-8,1 6,-2,1 10,-505,1 12,-250,1 46,509,1 1,292,0 1,-762,1 2,0,1 28,322,1 12,475,1 3,1,1 14,-1088,1 9,2047,1 11,-6,1 1,-3,1 0,5,1 4,70,1 1,-5,1 1,1,1 3,-61,1 1,14,1 6,-38,1 1,4,1 1,-723,1 0,15,1 0,709,1 4,-1528,1 0,1689,1 2,-4,1 2,-126,1 0,120,1 3,-885,1 1,742,1 2,-4,1 7,-1525,1 5,1720,1 4,-177,1 1,0,1 2,182,1 3,-25,1 1,18,1 1,-186,1 2,-3,1 0,184,1 7,-928,1 2,0,1 2,771,1 10,-745,1 1,-2,1 2,-27,1 0,5,1 4,522,1 1,-1814,1 0,1304,1 2,-1305,1 2,0,1 2,1302,1 2,-1464,1 18,783,1 2,144,1 0,2,1 2,-106,1 1,-127,1 1,-81,1 0,207,1 1,-186,1 1,304,1 1,1,1 0,1273,1 1,-2,1 3,-2049,1 2,0,1 9,643,1 2,-644,1 2,28,1 6,155,1 0,268,1 2,-443,1 4,557,1 5,-552,1 0,550,1 1,-551,1 4,155,1 1,398,1 6,362,1 2,-398,1 2,-379,1 2,794,1 1,-792,1 4,5,1 2,-24,1 0,427,1 1,-556,1 5,15,1 4,25,1 2,0,1 4,7,1 1,-52,1 0,48,1 2,-35,1 0,759,1 6,325,1 33,-566,1 15,-95,1 0,2,1 20,-588,1 3,249,1 12,656,0 7,-870,0 2,1801,1 15,-1246,1 1,-3,1 27,272,1 1,-1,1 9,464,0 23,399,1 4,1006,1 43,-2143,1 5,331,1 3,1,1 18,-347,1 2,-201,1 7,595,1 1,-576,1 8,-17,1 0,350,1 0,1,1 1,-349,1 0,1734,1 1,1,1 17,-254,1 16,-1027,1 3,1013,1 10,-1654,1 1,1829,1 4,32,1 8,-201,1 3,-1347,1 3,-134,1 7,1444,1 3,-4,1 1,46,1 2,0,1 6,-891,1 0,926,1 8,-1431,1 9,1497,1 1,-129,1 2,131,1 16,-150,1 6,58,1 8,80,1 14,-11,1 4,-4,1 3,-71,1 2,15,1 0,70,1 2,-84,1 0,12,1 2,-1292,1 20,957,1 19,352,1 4,8,1 1,-274,1 32,294,1 2,3,1 33,-8,1 11,-1172,1 10,831,1 8,-525,1 5,-9,1 1,-1,1 16,791,1 3,-1189,1 16,254,1 9,-20,1 9,-245,1 38,282,1 119,414,1 0,8,0 7,9,0 4,-27,1 4,36,0 9,11,0 12,15,0 10,1004,1 1,-990,0 109,1011,1 94,-1340,1 108,1804,1 43,-1411,1 55,-1076,1 83,1139,1 71,-375,1 69,-1052,1 222,995,0 6,1258,1 22,626,1 163,-2879,1 15,883,1 2,-433,1 35,566,0 17,1188,1 54,450,1 263,106,1";
++
++let chargeCache = null;
++
++function chargePoints() {
++  if (chargeCache) return chargeCache;
++  let lat = 0;
++  let lng = 0;
++  chargeCache = CHARGE_PACKED.split(" ").map((token) => {
++    const [dLat, dLng, vin] = token.split(",").map(Number);
++    lat += dLat;
++    lng += dLng;
++    return { lat: lat / 1e4, lng: lng / 1e4, vin: vin === 1 };
++  });
++  return chargeCache;
++}
++
++// Tia ngang đếm số lần cắt cạnh — đủ cho 9 đa giác đơn.
++function insideRing(pos, ring) {
++  let inside = false;
++  for (let i = 0, k = ring.length - 1; i < ring.length; k = i, i += 1) {
++    const [latI, lngI] = ring[i];
++    const [latK, lngK] = ring[k];
++    if (latI > pos.lat !== latK > pos.lat && pos.lng < ((lngK - lngI) * (pos.lat - latI)) / (latK - latI) + lngI) {
++      inside = !inside;
++    }
++  }
++  return inside;
++}
++
++function lezWardOf(item) {
++  const pos = realPos(item);
++  if (!pos) return null;
++  const hit = LEZ_WARDS.find(([, ring]) => insideRing(pos, ring));
++  return hit ? hit[0] : null;
++}
++
++/* ---------- Bật tắt lớp trên nền MapLibre ---------- */
++
++const mapLayerState = { lez: false, charge: false };
++
++function lezGeoJson() {
++  return {
++    type: "FeatureCollection",
++    features: LEZ_WARDS.map(([name, ring]) => ({
++      type: "Feature",
++      properties: { name },
++      geometry: { type: "Polygon", coordinates: [ring.map(([lat, lng]) => [lng, lat])] },
++    })),
++  };
++}
++
++function chargeGeoJson() {
++  return {
++    type: "FeatureCollection",
++    features: chargePoints().map((p) => ({
++      type: "Feature",
++      properties: { vin: p.vin ? 1 : 0 },
++      geometry: { type: "Point", coordinates: [p.lng, p.lat] },
++    })),
++  };
++}
++
++let layerRetry = false;
++
++function ensureMapLayers() {
++  if (!mapObj) return false;
++  // Style có thể còn đang tải (hoặc vừa đổi nền): chưa thêm lớp được thì hẹn
++  // thử lại đúng một lần khi bản đồ rảnh, chứ không bỏ luôn như trước.
++  if (!mapObj.isStyleLoaded()) {
++    if (!layerRetry) {
++      layerRetry = true;
++      mapObj.once("idle", () => {
++        layerRetry = false;
++        if (ensureMapLayers()) syncMapLayers();
++      });
++    }
++    return false;
++  }
++
++  if (!mapObj.getSource("lez")) {
++    mapObj.addSource("lez", { type: "geojson", data: lezGeoJson() });
++    mapObj.addLayer({
++      id: "lez-fill",
++      type: "fill",
++      source: "lez",
++      layout: { visibility: "none" },
++      paint: { "fill-color": "#d98324", "fill-opacity": 0.16 },
++    });
++    // Nét đứt là cố ý: nhắc rằng đây là ranh giới chỉ chỗ, không phải vạch cấm.
++    mapObj.addLayer({
++      id: "lez-line",
++      type: "line",
++      source: "lez",
++      layout: { visibility: "none", "line-join": "round" },
++      paint: { "line-color": "#b3651a", "line-width": 2, "line-dasharray": [3, 2] },
++    });
++    mapObj.on("click", "lez-fill", () => openLezNote());
++    mapObj.on("mouseenter", "lez-fill", () => {
++      mapObj.getCanvas().style.cursor = "pointer";
++    });
++    mapObj.on("mouseleave", "lez-fill", () => {
++      mapObj.getCanvas().style.cursor = "";
++    });
++  }
++
++  if (!mapObj.getSource("charge")) {
++    mapObj.addSource("charge", { type: "geojson", data: chargeGeoJson() });
++    mapObj.addLayer({
++      id: "charge-dot",
++      type: "circle",
++      source: "charge",
++      layout: { visibility: "none" },
++      paint: {
++        "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 2.4, 14, 4.5, 17, 7],
++        "circle-color": ["case", ["==", ["get", "vin"], 1], "#1f7a4d", "#2b6cb0"],
++        "circle-stroke-width": 1.4,
++        "circle-stroke-color": "#ffffff",
++        "circle-opacity": 0.92,
++      },
++    });
++  }
++  return true;
++}
++
++function syncMapLayers() {
++  if (!ensureMapLayers()) return;
++  const show = (id, on) => {
++    if (mapObj.getLayer(id)) mapObj.setLayoutProperty(id, "visibility", on ? "visible" : "none");
++  };
++  show("lez-fill", mapLayerState.lez);
++  show("lez-line", mapLayerState.lez);
++  show("charge-dot", mapLayerState.charge);
++}
++
++async function toggleMapLayer(key) {
++  // Lớp chỉ có nghĩa trên nền bản đồ thật, nên bật nó lên trước.
++  if (!mapMode) await setMapMode(true, { silent: true });
++  if (!mapObj) return;
++  mapLayerState[key] = !mapLayerState[key];
++  syncMapLayers();
++  renderMapLayerChips();
++  renderMapNote();
++  if (mapLayerState[key]) {
++    if (key === "lez") openLezNote();
++    else toast(t("chargeWarn"), 6000);
++  }
++}
++
++/* ---------- Chip bật lớp + ghi chú giải thích ---------- */
++
++function renderMapLayerChips() {
++  const host = document.querySelector("#pinLegend");
++  if (!host) return;
++  let strip = document.querySelector("#mapLayers");
++  if (!strip) {
++    strip = document.createElement("div");
++    strip.id = "mapLayers";
++    strip.className = "map-layers";
++    host.insertAdjacentElement("afterend", strip);
++  }
++  const items = [
++    { key: "lez", name: t("lezName"), title: t("lezOn"), tone: "lez" },
++    { key: "charge", name: t("chargeName"), title: t("chargeOn", { n: chargePoints().length }), tone: "charge" },
++  ];
++  strip.innerHTML = items
++    .map(
++      (item) =>
++        `<button class="map-layers__item map-layers__item--${item.tone}" type="button" data-layer="${item.key}" ` +
++        `aria-pressed="${mapLayerState[item.key]}" title="${escapeHtml(item.title)}"><i></i>${escapeHtml(item.name)}</button>`,
++    )
++    .join("");
++  strip.querySelectorAll("[data-layer]").forEach((button) => {
++    button.addEventListener("click", () => toggleMapLayer(button.dataset.layer));
++  });
++}
++
++function sourceLinkHtml(id) {
++  const item = SOURCE_BY_ID[id];
++  if (!item) return "";
++  return `<a class="map-note__src" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer noopener">${escapeHtml(item.ref)} <span aria-hidden="true">↗</span></a>`;
++}
++
++function renderMapNote() {
++  let note = document.querySelector("#mapNote");
++  const on = mapMode && (mapLayerState.lez || mapLayerState.charge);
++  if (!on) {
++    note?.remove();
++    return;
++  }
++  if (!note) {
++    note = document.createElement("section");
++    note.id = "mapNote";
++    note.className = "map-note";
++    document.querySelector(".hud-left")?.appendChild(note);
++  }
++  const blocks = [];
++  if (mapLayerState.lez) {
++    blocks.push(`
++      <article class="map-note__block">
++        <h3>${escapeHtml(t("lezTitle"))}</h3>
++        <p class="map-note__when">${escapeHtml(t("lezWhen"))}</p>
++        <p>${escapeHtml(t("lezWhere"))}</p>
++        <p class="map-note__warn">${escapeHtml(t("lezWarn"))}</p>
++        <p>${escapeHtml(t("lezWhat"))}</p>
++        <p class="map-note__gap"><b>${escapeHtml(t("lezHours"))}.</b> ${escapeHtml(t("lezHoursWhy"))}</p>
++        <p class="map-note__next">${escapeHtml(t("lezNext"))}</p>
++        <p class="map-note__srcs">${escapeHtml(t("srcSee"))}: ${sourceLinkHtml("nq-57-2025")} ${sourceLinkHtml("ct-20-2025")}</p>
++      </article>`);
++  }
++  if (mapLayerState.charge) {
++    const points = chargePoints();
++    blocks.push(`
++      <article class="map-note__block">
++        <h3>${escapeHtml(t("chargeTitle"))}</h3>
++        <p>${escapeHtml(t("chargeCount", { n: points.length, v: points.filter((p) => p.vin).length }))}</p>
++        <p class="map-note__warn">${escapeHtml(t("chargeWarn"))}</p>
++        <p class="map-note__srcs">${escapeHtml(t("srcSee"))}: ${sourceLinkHtml("osm")}</p>
++      </article>`);
++  }
++  note.innerHTML = blocks.join("");
++}
++
++function openLezNote() {
++  if (!mapLayerState.lez) return;
++  renderMapNote();
++  document.querySelector("#mapNote")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
++}
++
++function bootMapLayers() {
++  registerLayer("lez", ["nq-57-2025", "ct-20-2025", "luat-thu-do-2024", "osm"]);
++  registerLayer("charge", ["osm"]);
++  renderMapLayerChips();
++  const asked = (QUERY.get("lop") || "").toLowerCase().split(",").filter(Boolean);
++  if (asked.includes("lez") || asked.includes("phatthai")) toggleMapLayer("lez");
++  if (asked.includes("sac") || asked.includes("charge")) toggleMapLayer("charge");
++}
++
+ /* ---------- Cài về màn hình chính + chạy offline ---------- */
+@@ -5738,2 +6056,3 @@
+   bootSources();
++  bootMapLayers();
+   registerServiceWorker();
+@@ -5768,2 +6087,4 @@
+     mapError: mapLastError,
++    mapLayers: { ...mapLayerState },
++    lezInside: STARTUPS.filter((item) => lezWardOf(item)).length,
+     realCoords: Object.keys(REAL_COORDS).length,
+##### src/styles.css 39533
+@@ -1750 +1750,190 @@
+ }
++
++/* ==========================================================================
++   LỚP VÙNG PHÁT THẢI THẤP + TRẠM SẠC · LEZ & CHARGING LAYERS
++   ========================================================================== */
++
++/* Khi bảng ghi chú lớp mở ra, danh sách khu vực vẫn phải còn chỗ đứng —
++   nó cuộn bên trong chứ không được ép xuống 0. */
++@media (min-width: 54.01rem) {
++  body.is-map .area-list {
++    min-height: 9rem;
++  }
++}
++
++.map-layers {
++  display: none;
++  flex-wrap: wrap;
++  gap: 6px;
++  padding: 8px 0 0;
++  margin-top: 8px;
++  border-top: 1px solid oklch(20% 0.024 258 / 0.1);
++}
++
++body.is-map .map-layers {
++  display: flex;
++}
++
++.map-layers__item {
++  display: inline-flex;
++  align-items: center;
++  gap: 6px;
++  min-height: 28px;
++  padding: 3px 10px;
++  border: 1px solid oklch(20% 0.024 258 / 0.14);
++  border-radius: 999px;
++  background: oklch(100% 0 0 / 0.34);
++  color: var(--color-ink-2);
++  font: inherit;
++  font-size: var(--fs-xs);
++  white-space: nowrap;
++  cursor: pointer;
++  transition:
++    background-color var(--dur-short) var(--ease-out),
++    border-color var(--dur-short) var(--ease-out);
++}
++
++.map-layers__item i {
++  width: 9px;
++  height: 9px;
++  border-radius: 2px;
++  background: var(--tone, var(--color-accent));
++}
++
++/* Nét đứt trên chip nhắc lại nét đứt trên bản đồ: ranh giới chỉ chỗ. */
++.map-layers__item--lez {
++  --tone: #b3651a;
++}
++
++.map-layers__item--lez i {
++  border: 1.5px dashed #b3651a;
++  background: oklch(70% 0.15 60 / 0.28);
++}
++
++.map-layers__item--charge {
++  --tone: #1f7a4d;
++}
++
++.map-layers__item--charge i {
++  border-radius: 50%;
++}
++
++.map-layers__item[aria-pressed="true"] {
++  border-color: var(--tone);
++  background: color-mix(in oklch, var(--tone) 14%, transparent);
++  color: var(--color-ink);
++  font-weight: 600;
++}
++
++/* Ghi chú giải thích lớp: nằm dưới thẻ chi tiết trong cột trái. */
++.map-note {
++  flex: 0 1 auto;
++  min-height: 0;
++  /* Chặn chiều cao để thanh khu vực phía trên không bị ép mất. */
++  max-height: 32vh;
++  padding: var(--space-md);
++  border: 1px solid var(--glass-border);
++  border-radius: var(--radius-lg);
++  background: var(--glass-bg-strong);
++  -webkit-backdrop-filter: var(--glass-blur);
++  backdrop-filter: var(--glass-blur);
++  box-shadow: var(--glass-shadow);
++  color: var(--color-ink-2);
++  font-size: var(--fs-sm);
++  line-height: 1.55;
++  overflow-y: auto;
++  animation: hudInUp var(--dur-med) var(--ease-out) backwards;
++}
++
++.map-note__block + .map-note__block {
++  margin-top: var(--space-md);
++  padding-top: var(--space-sm);
++  border-top: 1px solid var(--color-rule);
++}
++
++.map-note h3 {
++  margin: 0 0 2px;
++  color: var(--color-ink);
++  font-size: var(--fs-md);
++}
++
++.map-note p {
++  margin: 6px 0 0;
++}
++
++.map-note__when {
++  color: var(--color-muted);
++  font-size: var(--fs-xs);
++  font-variant-numeric: tabular-nums;
++}
++
++/* Cảnh báo hiểu nhầm: đây là chỗ dễ làm người ta đi sai nhất. */
++.map-note__warn {
++  padding: 8px 11px;
++  border-left: 3px solid oklch(70% 0.15 60);
++  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
++  background: oklch(70% 0.15 84 / 0.14);
++  color: oklch(38% 0.11 55);
++}
++
++/* Chỗ chưa có văn bản: viền đứt, cùng ngôn ngữ với pin toạ độ ước lượng. */
++.map-note__gap {
++  padding: 8px 11px;
++  border: 1px dashed oklch(50% 0.02 258 / 0.45);
++  border-radius: var(--radius-xs);
++  background: var(--color-paper-2);
++}
++
++.map-note__next {
++  color: var(--color-muted);
++  font-size: var(--fs-xs);
++}
++
++.map-note__srcs {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 4px 8px;
++  align-items: baseline;
++  color: var(--color-muted);
++  font-size: var(--fs-xs);
++}
++
++.map-note__src {
++  color: var(--color-accent);
++  font-weight: 600;
++  text-decoration: none;
++}
++
++.map-note__src:hover {
++  text-decoration: underline;
++}
++
++.chip--lez {
++  border: 1px dashed oklch(55% 0.13 55 / 0.6);
++  background: oklch(70% 0.15 84 / 0.16);
++  color: oklch(38% 0.11 55);
++  cursor: pointer;
++  font: inherit;
++  font-size: var(--fs-xs);
++  font-weight: 600;
++}
++
++@media (max-width: 54rem) {
++  .map-note {
++    max-height: 38vh;
++  }
++
++  .map-layers {
++    flex-wrap: nowrap;
++    overflow-x: auto;
++    scrollbar-width: none;
++  }
++
++  .map-layers::-webkit-scrollbar {
++    display: none;
++  }
++
++  .map-layers__item {
++    flex: 0 0 auto;
++  }
++}

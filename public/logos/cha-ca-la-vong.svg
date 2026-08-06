@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Chả cá Lã Vọng">
+  <rect width="64" height="64" rx="14" fill="#dd9a1f"/>
+  <g fill="#ffffff">
+    <path d="M13 30h38a2 2 0 0 1 2 2.2C52.2 41.5 45 48.6 36.5 50.4V53h-9v-2.6C19 48.6 11.8 41.5 11 32.2A2 2 0 0 1 13 30Z"/>
+    <path d="M22 27.2 45.6 13l2.6 3.4L26.4 28.6Z" opacity="0.9"/></g>
+</svg>

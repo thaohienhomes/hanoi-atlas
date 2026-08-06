@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Bảo tàng Dân tộc học">
+  <rect width="64" height="64" rx="14" fill="#1fa99b"/>
+  <g fill="#ffffff">
+    <path d="M10 32 32 14l22 18h-7v18H37V38h-10v12H17V32Z"/></g>
+</svg>

@@ -1,0 +1,552 @@
+##### src/main.js 212639
+@@ -4001,2 +4001,13 @@
+     liveBadgeEl.setAttribute("role", "status");
++    // Huy hiệu thời tiết cũng là cửa vào bảng nguồn: trên điện thoại thanh
++    // bên bị ẩn nên đây là chỗ luôn chạm tới được.
++    liveBadgeEl.tabIndex = 0;
++    liveBadgeEl.style.cursor = "pointer";
++    liveBadgeEl.addEventListener("click", () => openSources());
++    liveBadgeEl.addEventListener("keydown", (event) => {
++      if (event.key === "Enter" || event.key === " ") {
++        event.preventDefault();
++        openSources();
++      }
++    });
+     const host = document.querySelector(".hud-top-right");
+@@ -4184,3 +4195,3 @@
+     hint: "<kbd>↑</kbd><kbd>↓</kbd> khu vực · <kbd>⌘K</kbd> tìm kiếm · chạm vào pin",
+-    credit: 'Dữ liệu chọn lọc thủ công · Dựng lại từ <a href="https://github.com/Nutlope/nyc-ai-atlas" target="_blank" rel="noreferrer">NYC AI Atlas</a> · 2026',
++    credit: 'Dữ liệu chọn lọc thủ công · <a href="#/nguon" data-sources>Nguồn &amp; đối chiếu</a> · Dựng lại từ <a href="https://github.com/Nutlope/nyc-ai-atlas" target="_blank" rel="noreferrer">NYC AI Atlas</a> · 2026',
+     suggest: "Đề xuất địa điểm",
+@@ -4255,2 +4266,18 @@
+     mapApprox: "Vị trí ước lượng, chưa dò được trên OpenStreetMap",
++    srcTitle: "Nguồn & đối chiếu",
++    srcLead: "Mọi con số trên bản đồ này đều dẫn được về nguồn. Chỗ nào dựa vào văn bản nhà nước thì ghi rõ số hiệu, cơ quan ban hành, ngày ký và có link mở thẳng văn bản gốc để bạn tự đọc.",
++    srcOpen: "Mở văn bản gốc",
++    srcOpenData: "Mở nguồn",
++    srcChecked: "Đối chiếu lần cuối {d}",
++    srcStale: "Đã quá {n} ngày chưa đối chiếu lại — hãy mở văn bản gốc kiểm tra trước khi tin.",
++    srcSigned: "ký {d}",
++    srcEffective: "hiệu lực {d}",
++    srcReplaces: "Thay thế {v}",
++    srcUse: "Bản đồ dùng để",
++    srcGroupLaw: "Văn bản nhà nước",
++    srcGroupData: "Dữ liệu mở",
++    srcGroupGap: "Chưa có văn bản công bố",
++    srcGapLead: "Những mục dưới đây bản đồ cố tình để trống. Chưa có văn bản nào quy định nên không suy diễn.",
++    srcBadge: "Nguồn",
++    srcClose: "Đóng",
+   },
+@@ -4263,3 +4290,3 @@
+     hint: "<kbd>↑</kbd><kbd>↓</kbd> areas · <kbd>⌘K</kbd> search · tap a pin",
+-    credit: 'Hand-curated data · Rebuilt from <a href="https://github.com/Nutlope/nyc-ai-atlas" target="_blank" rel="noreferrer">NYC AI Atlas</a> · 2026',
++    credit: 'Hand-curated data · <a href="#/nguon" data-sources>Sources &amp; checks</a> · Rebuilt from <a href="https://github.com/Nutlope/nyc-ai-atlas" target="_blank" rel="noreferrer">NYC AI Atlas</a> · 2026',
+     suggest: "Suggest a place",
+@@ -4334,2 +4361,18 @@
+     mapApprox: "Approximate position, not yet matched on OpenStreetMap",
++    srcTitle: "Sources & checks",
++    srcLead: "Every figure on this map traces back to a source. Anything resting on a Vietnamese government document carries its number, issuing body and signing date, plus a link straight to the original so you can read it yourself.",
++    srcOpen: "Open the original",
++    srcOpenData: "Open source",
++    srcChecked: "Last checked {d}",
++    srcStale: "Not re-checked for {n} days — open the original before relying on it.",
++    srcSigned: "signed {d}",
++    srcEffective: "in force {d}",
++    srcReplaces: "Replaces {v}",
++    srcUse: "Used here for",
++    srcGroupLaw: "Government documents",
++    srcGroupData: "Open data",
++    srcGroupGap: "Not yet published",
++    srcGapLead: "The map deliberately leaves these blank. No document sets them out, so it does not guess.",
++    srcBadge: "Sources",
++    srcClose: "Close",
+   },
+@@ -5376,2 +5419,303 @@
+
++/* ==========================================================================
++   NGUỒN & ĐỐI CHIẾU · SOURCES AND CITATIONS
++   Nguyên tắc của dự án: bất kỳ điều gì bản đồ khẳng định mà dựa vào văn bản
++   nhà nước đều phải ghi rõ số hiệu, cơ quan ban hành, ngày ký, ngày hiệu lực
++   và kèm link mở thẳng văn bản gốc — người dân tự đọc, không phải tin lời
++   một cái app. Chỗ nào văn bản chưa quy định thì ghi thẳng "chưa công bố"
++   chứ không suy diễn: đi nhầm đường vì một khung giờ bịa ra là mất tiền thật.
++   Mọi lớp dữ liệu pháp lý thêm về sau bắt buộc khai `sources` ở đây.
++   Mở bằng #/nguon, chạm vào huy hiệu thời tiết, hoặc link ở chân thanh bên.
++   ========================================================================== */
++
++// Ngày gần nhất người làm ngồi mở lại từng văn bản để đối chiếu.
++const SOURCE_CHECKED = "2026-08-06";
++const SOURCE_STALE_DAYS = 180;
++
++const SOURCES = [
++  {
++    id: "luat-thu-do-2024",
++    group: "law",
++    kind: "Luật",
++    kindEn: "Law",
++    ref: "Luật Thủ đô số 39/2024/QH15",
++    title: "Luật Thủ đô — điểm a khoản 2 Điều 28 cho phép Hà Nội lập vùng phát thải thấp",
++    titleEn: "Law on the Capital — Article 28(2)(a) lets Hanoi create a low-emission zone",
++    body: "Quốc hội",
++    bodyEn: "National Assembly",
++    signed: "2024-06-28",
++    uses: "Căn cứ pháp lý gốc của vùng phát thải thấp; mọi lớp liên quan đều quy về đây.",
++    usesEn: "The root legal basis for the low-emission zone; every related layer traces back to it.",
++    note: "Link là bản hợp nhất 114/VBHN-VPQH do Văn phòng Quốc hội phát hành.",
++    noteEn: "The link is consolidated text 114/VBHN-VPQH issued by the National Assembly Office.",
++    url: "https://datafiles.chinhphu.vn/cpp/files/vbpq/2025/9/114-vbhn-vpqh.pdf",
++  },
++  {
++    id: "nq-57-2025",
++    group: "law",
++    kind: "Nghị quyết",
++    kindEn: "Resolution",
++    ref: "Nghị quyết 57/2025/NQ-HĐND",
++    title: "Quy định thực hiện vùng phát thải thấp trên địa bàn thành phố Hà Nội",
++    titleEn: "Rules for running the low-emission zone in Hanoi",
++    body: "HĐND thành phố Hà Nội · kỳ họp thứ 28",
++    bodyEn: "Hanoi People's Council · 28th session",
++    signed: "2025-11-26",
++    effective: "2025-12-10",
++    replaces: "Nghị quyết 47/2024/NQ-HĐND ngày 12/12/2024",
++    replacesEn: "Resolution 47/2024/NQ-HĐND of 12 Dec 2024",
++    uses: "Danh sách 9 phường và mốc thời gian của vùng phát thải thấp.",
++    usesEn: "The list of nine wards and the dates of the low-emission zone.",
++    note: "Giai đoạn 01/7/2026 – 31/12/2027 chỉ thí điểm một số khu vực trong Vành đai 1, thuộc 9 phường: Hai Bà Trưng, Cửa Nam, Hoàn Kiếm, Ô Chợ Dừa, Văn Miếu, Ba Đình, Giảng Võ, Ngọc Hà, Tây Hồ. Không phải cấm cả phường.",
++    noteEn: "From 1 Jul 2026 to 31 Dec 2027 the zone is a pilot inside parts of Ring Road 1, across nine wards: Hai Bà Trưng, Cửa Nam, Hoàn Kiếm, Ô Chợ Dừa, Văn Miếu, Ba Đình, Giảng Võ, Ngọc Hà, Tây Hồ. It is not a whole-ward ban.",
++    url: "https://vanban.hanoi.gov.vn/chi-tiet-van-ban/quy-dinh-thuc-hien-vung-phat-thai-thap-tren-dia-ban-thanh-pho-ha-noi-thuc-hien-diem-a-khoan-2-dieu--228371",
++  },
++  {
++    id: "ct-20-2025",
++    group: "law",
++    kind: "Chỉ thị",
++    kindEn: "Directive",
++    ref: "Chỉ thị 20/CT-TTg",
++    title: "Một số nhiệm vụ cấp bách, quyết liệt ngăn chặn, giải quyết tình trạng ô nhiễm môi trường",
++    titleEn: "Urgent tasks to halt and resolve environmental pollution",
++    body: "Thủ tướng Chính phủ · Phạm Minh Chính ký",
++    bodyEn: "Prime Minister · signed by Phạm Minh Chính",
++    signed: "2025-07-12",
++    uses: "Mốc 01/7/2026 với Vành đai 1, 01/01/2028 với Vành đai 1–2 và từ 2030 mở ra Vành đai 3.",
++    usesEn: "The 1 Jul 2026 Ring Road 1 milestone, 1 Jan 2028 for Ring Roads 1–2, and 2030 out to Ring Road 3.",
++    url: "https://vanban.chinhphu.vn/?docid=214542&pageid=27160",
++  },
++  {
++    id: "nq-1656-2025",
++    group: "law",
++    kind: "Nghị quyết",
++    kindEn: "Resolution",
++    ref: "Nghị quyết 1656/NQ-UBTVQH15",
++    title: "Sắp xếp các đơn vị hành chính cấp xã của thành phố Hà Nội năm 2025",
++    titleEn: "2025 rearrangement of Hanoi's commune-level administrative units",
++    body: "Ủy ban Thường vụ Quốc hội · Trần Thanh Mẫn ký",
++    bodyEn: "National Assembly Standing Committee · signed by Trần Thanh Mẫn",
++    signed: "2025-06-16",
++    effective: "2025-07-01",
++    uses: "Bộ 126 phường, xã mới của Hà Nội (51 phường + 75 xã) dùng cho phần tra phường sau sáp nhập.",
++    usesEn: "Hanoi's 126 new wards and communes (51 wards + 75 communes) behind the ward lookup.",
++    url: "https://vanban.chinhphu.vn/?pageid=27160&docid=214008",
++  },
++  {
++    id: "qd-1668-2024",
++    group: "law",
++    kind: "Quyết định",
++    kindEn: "Decision",
++    ref: "Quyết định 1668/QĐ-TTg",
++    title: "Phê duyệt Điều chỉnh Quy hoạch chung Thủ đô Hà Nội đến năm 2045, tầm nhìn đến năm 2065",
++    titleEn: "Approving the revised Hanoi master plan to 2045, with a vision to 2065",
++    body: "Thủ tướng Chính phủ · Trần Hồng Hà ký",
++    bodyEn: "Prime Minister · signed by Trần Hồng Hà",
++    signed: "2024-12-27",
++    uses: "Sơ đồ quy hoạch khung sắp tới. Đây là bản vẽ minh hoạ theo văn bản, không thay được bản đồ quy hoạch pháp lý.",
++    usesEn: "The upcoming framework plan sketch. It illustrates the document and is not a legal planning map.",
++    url: "https://chinhphu.vn/?pageid=27160&docid=212179",
++  },
++  {
++    id: "osm",
++    group: "data",
++    kind: "Dữ liệu mở",
++    kindEn: "Open data",
++    ref: "OpenStreetMap",
++    title: "Nền đường phố và toạ độ thực địa của 45/52 địa điểm",
++    titleEn: "Street base map and real-world coordinates for 45 of 52 places",
++    body: "Cộng đồng OpenStreetMap · giấy phép ODbL",
++    bodyEn: "OpenStreetMap contributors · ODbL licence",
++    uses: "Toạ độ dò bằng Nominatim, ngưỡng loại 900 m, sai lệch trung bình 192 m.",
++    usesEn: "Coordinates matched with Nominatim, 900 m rejection ceiling, 192 m average offset.",
++    url: "https://www.openstreetmap.org/copyright",
++  },
++  {
++    id: "openfreemap",
++    group: "data",
++    kind: "Dịch vụ",
++    kindEn: "Service",
++    ref: "OpenFreeMap",
++    title: "Máy chủ tile cho chế độ bản đồ đường phố thật",
++    titleEn: "Tile server behind the real street-map mode",
++    body: "OpenFreeMap · miễn phí, không cần API key",
++    bodyEn: "OpenFreeMap · free, no API key",
++    uses: "Nền liberty. Đổi nền bằng ?nen=duong|sang|dam.",
++    usesEn: "The liberty style. Switch with ?nen=duong|sang|dam.",
++    url: "https://openfreemap.org",
++  },
++  {
++    id: "open-meteo",
++    group: "data",
++    kind: "API",
++    kindEn: "API",
++    ref: "Open-Meteo",
++    title: "Thời tiết và chất lượng không khí Hà Nội theo thời gian thực",
++    titleEn: "Live Hanoi weather and air quality",
++    body: "Open-Meteo · miễn phí, không cần API key",
++    bodyEn: "Open-Meteo · free, no API key",
++    uses: "Huy hiệu góc phải trên, và bầu trời – sương – mưa – đèn của cảnh 3D. Tự làm mới mỗi 15 phút.",
++    usesEn: "The top-right badge, plus the sky, fog, rain and lights of the 3D scene. Refreshes every 15 minutes.",
++    url: "https://open-meteo.com",
++  },
++];
++
++// Những chỗ cố tình để trống. Ghi ra đây để người dùng biết bản đồ đang
++// thiếu gì, thay vì đoán bừa rồi họ đi nhầm.
++const SOURCE_GAPS = [
++  {
++    what: "Khung giờ cấm cụ thể trong vùng phát thải thấp",
++    whatEn: "The exact restricted hours inside the low-emission zone",
++    why: "Nghị quyết 57/2025/NQ-HĐND nêu loại phương tiện và mốc thời gian, nhưng không ấn định giờ. Chi tiết chờ đề án của UBND thành phố. Khi nào có văn bản, bản đồ mới hiện giờ.",
++    whyEn: "Resolution 57/2025/NQ-HĐND names the vehicle classes and the dates but sets no hours. The detail waits on the city government's implementation scheme. The map will show hours only once a document exists.",
++    ref: "nq-57-2025",
++  },
++  {
++    what: "Ranh giới chính xác của khu vực thí điểm trong Vành đai 1",
++    whatEn: "The exact outline of the pilot area inside Ring Road 1",
++    why: "Nghị quyết nêu 9 phường nhưng vùng thí điểm chỉ là một số khu vực trong đó. Bản đồ vẽ ranh giới phường để bạn biết đại khái ở đâu, không dùng thay bản đồ cấm đường.",
++    whyEn: "The resolution names nine wards, but the pilot covers only parts of them. The map draws ward outlines so you know roughly where, not as a substitute for an official restriction map.",
++    ref: "nq-57-2025",
++  },
++];
++
++const SOURCE_BY_ID = Object.fromEntries(SOURCES.map((item) => [item.id, item]));
++
++// Lớp dữ liệu nào cũng phải khai nguồn trước khi vẽ. Thiếu là kêu ngay ở
++// console lúc phát triển, chứ không im lặng phát hành một lớp vô căn cứ.
++const LAYER_SOURCES = new Map();
++
++function registerLayer(layerId, sourceIds) {
++  const ids = (sourceIds || []).filter((id) => SOURCE_BY_ID[id]);
++  if (!ids.length) {
++    console.warn(`[nguồn] lớp "${layerId}" chưa khai văn bản nào — không được vẽ dữ liệu pháp lý.`);
++    return false;
++  }
++  LAYER_SOURCES.set(layerId, ids);
++  return true;
++}
++
++function dmy(iso) {
++  if (!iso) return "";
++  const [y, m, d] = String(iso).split("-");
++  return d && m && y ? `${d}/${m}/${y}` : String(iso);
++}
++
++function daysSince(iso) {
++  const then = Date.parse(`${iso}T00:00:00Z`);
++  if (!Number.isFinite(then)) return 0;
++  return Math.max(0, Math.round((Date.now() - then) / 86400000));
++}
++
++function srcText(item, key) {
++  return LANG === "en" ? (item[`${key}En`] ?? item[key] ?? "") : (item[key] ?? "");
++}
++
++let sourceDialog = null;
++let sourceReturnHash = "";
++
++function sourceCard(item) {
++  const meta = [
++    escapeHtml(srcText(item, "body")),
++    item.signed ? escapeHtml(t("srcSigned", { d: dmy(item.signed) })) : null,
++    item.effective ? escapeHtml(t("srcEffective", { d: dmy(item.effective) })) : null,
++  ].filter(Boolean);
++
++  return `
++    <article class="src-card">
++      <p class="src-card__ref"><span class="src-card__kind">${escapeHtml(srcText(item, "kind"))}</span>${escapeHtml(item.ref)}</p>
++      <h3>${escapeHtml(srcText(item, "title"))}</h3>
++      <p class="src-card__meta">${meta.join(" · ")}</p>
++      ${item.replaces ? `<p class="src-card__meta">${escapeHtml(t("srcReplaces", { v: srcText(item, "replaces") }))}</p>` : ""}
++      <p class="src-card__use"><b>${escapeHtml(t("srcUse"))}:</b> ${escapeHtml(srcText(item, "uses"))}</p>
++      ${item.note ? `<p class="src-card__note">${escapeHtml(srcText(item, "note"))}</p>` : ""}
++      <a class="src-card__link" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer noopener">
++        ${escapeHtml(item.group === "law" ? t("srcOpen") : t("srcOpenData"))} <span aria-hidden="true">↗</span>
++      </a>
++    </article>`;
++}
++
++function renderSources() {
++  if (!sourceDialog) return;
++  const stale = daysSince(SOURCE_CHECKED) > SOURCE_STALE_DAYS;
++  const laws = SOURCES.filter((item) => item.group === "law");
++  const data = SOURCES.filter((item) => item.group === "data");
++
++  sourceDialog.innerHTML = `
++    <div class="src-sheet__head">
++      <div>
++        <h2>${escapeHtml(t("srcTitle"))}</h2>
++        <p class="src-sheet__checked">${escapeHtml(t("srcChecked", { d: dmy(SOURCE_CHECKED) }))}</p>
++      </div>
++      <button class="src-sheet__close" type="button" aria-label="${escapeHtml(t("srcClose"))}">✕</button>
++    </div>
++    <p class="src-sheet__lead">${escapeHtml(t("srcLead"))}</p>
++    ${stale ? `<p class="src-sheet__stale">${escapeHtml(t("srcStale", { n: daysSince(SOURCE_CHECKED) }))}</p>` : ""}
++
++    <h4 class="src-sheet__group">${escapeHtml(t("srcGroupLaw"))}</h4>
++    ${laws.map(sourceCard).join("")}
++
++    <h4 class="src-sheet__group">${escapeHtml(t("srcGroupData"))}</h4>
++    ${data.map(sourceCard).join("")}
++
++    <h4 class="src-sheet__group">${escapeHtml(t("srcGroupGap"))}</h4>
++    <p class="src-sheet__lead">${escapeHtml(t("srcGapLead"))}</p>
++    ${SOURCE_GAPS.map((gap) => {
++      const ref = SOURCE_BY_ID[gap.ref];
++      return `
++      <article class="src-card src-card--gap">
++        <h3>${escapeHtml(LANG === "en" ? gap.whatEn : gap.what)}</h3>
++        <p class="src-card__use">${escapeHtml(LANG === "en" ? gap.whyEn : gap.why)}</p>
++        ${ref ? `<a class="src-card__link" href="${escapeHtml(ref.url)}" target="_blank" rel="noreferrer noopener">${escapeHtml(ref.ref)} <span aria-hidden="true">↗</span></a>` : ""}
++      </article>`;
++    }).join("")}
++  `;
++
++  sourceDialog.querySelector(".src-sheet__close")?.addEventListener("click", () => closeSources());
++}
++
++function ensureSourceDialog() {
++  if (sourceDialog) return sourceDialog;
++  sourceDialog = document.createElement("dialog");
++  sourceDialog.id = "sourceSheet";
++  sourceDialog.className = "src-sheet";
++  sourceDialog.setAttribute("aria-label", t("srcTitle"));
++  sourceDialog.addEventListener("close", () => {
++    if (location.hash === "#/nguon") history.replaceState(null, "", `${location.pathname}${location.search}${sourceReturnHash}`);
++  });
++  sourceDialog.addEventListener("click", (event) => {
++    if (event.target === sourceDialog) closeSources();
++  });
++  document.body.appendChild(sourceDialog);
++  return sourceDialog;
++}
++
++function openSources() {
++  ensureSourceDialog();
++  renderSources();
++  if (!sourceDialog.open) {
++    sourceReturnHash = location.hash === "#/nguon" ? "" : location.hash;
++    sourceDialog.showModal();
++    if (location.hash !== "#/nguon") history.replaceState(null, "", `${location.pathname}${location.search}#/nguon`);
++  }
++}
++
++function closeSources() {
++  if (sourceDialog?.open) sourceDialog.close();
++}
++
++function bootSources() {
++  // Link "Nguồn & đối chiếu" ở chân thanh bên, và deep-link #/nguon.
++  document.addEventListener("click", (event) => {
++    const link = event.target?.closest?.("a[data-sources]");
++    if (!link) return;
++    event.preventDefault();
++    openSources();
++  });
++  window.addEventListener("hashchange", () => {
++    if (location.hash === "#/nguon") openSources();
++  });
++  if (location.hash === "#/nguon") openSources();
++}
++
+ /* ---------- Cài về màn hình chính + chạy offline ---------- */
+@@ -5393,2 +5737,3 @@
+   bootMapMode();
++  bootSources();
+   registerServiceWorker();
+##### src/styles.css 35392
+@@ -1572 +1572,179 @@
+ }
++
++/* ==========================================================================
++   BẢNG NGUỒN & ĐỐI CHIẾU · SOURCES SHEET
++   Người dùng bấm là ra danh sách văn bản gốc, mỗi cái một link mở thẳng.
++   ========================================================================== */
++
++.src-sheet {
++  width: min(46rem, calc(100vw - 24px));
++  max-height: min(84vh, 52rem);
++  padding: var(--space-lg);
++  border: 1px solid var(--glass-border);
++  border-radius: var(--radius-lg);
++  background: var(--color-paper);
++  color: var(--color-ink);
++  box-shadow: var(--glass-shadow);
++  overflow-y: auto;
++  overscroll-behavior: contain;
++}
++
++.src-sheet::backdrop {
++  background: oklch(20% 0.024 258 / 0.5);
++  -webkit-backdrop-filter: blur(3px);
++  backdrop-filter: blur(3px);
++}
++
++.src-sheet__head {
++  display: flex;
++  align-items: flex-start;
++  justify-content: space-between;
++  gap: var(--space-md);
++}
++
++.src-sheet__head h2 {
++  margin: 0;
++  font-size: var(--fs-xl);
++}
++
++.src-sheet__checked {
++  margin: 2px 0 0;
++  color: var(--color-muted);
++  font-size: var(--fs-xs);
++  font-variant-numeric: tabular-nums;
++}
++
++.src-sheet__close {
++  flex: none;
++  width: 32px;
++  height: 32px;
++  border: 1px solid var(--color-rule);
++  border-radius: 50%;
++  background: var(--color-paper-2);
++  color: var(--color-ink-2);
++  cursor: pointer;
++}
++
++.src-sheet__lead {
++  margin: var(--space-sm) 0 0;
++  color: var(--color-ink-2);
++  font-size: var(--fs-sm);
++  line-height: 1.6;
++}
++
++.src-sheet__stale {
++  margin: var(--space-sm) 0 0;
++  padding: 8px 12px;
++  border-radius: var(--radius-sm);
++  background: oklch(70% 0.15 84 / 0.16);
++  color: oklch(42% 0.12 60);
++  font-size: var(--fs-sm);
++}
++
++.src-sheet__group {
++  margin: var(--space-lg) 0 var(--space-xs);
++  padding-top: var(--space-sm);
++  border-top: 1px solid var(--color-rule);
++  color: var(--color-muted);
++  font-size: var(--fs-xs);
++  font-weight: 600;
++  letter-spacing: 0.06em;
++  text-transform: uppercase;
++}
++
++.src-card {
++  padding: var(--space-sm) 0;
++  border-bottom: 1px solid oklch(88% 0.012 252 / 0.6);
++}
++
++.src-card:last-of-type {
++  border-bottom: 0;
++}
++
++.src-card__ref {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  margin: 0;
++  color: var(--color-ink-2);
++  font-size: var(--fs-sm);
++  font-weight: 600;
++  font-variant-numeric: tabular-nums;
++}
++
++.src-card__kind {
++  padding: 1px 8px;
++  border-radius: 999px;
++  background: var(--color-accent-soft);
++  color: var(--color-accent);
++  font-size: var(--fs-xs);
++  font-weight: 600;
++  letter-spacing: 0.02em;
++}
++
++.src-card h3 {
++  margin: 4px 0 2px;
++  font-size: var(--fs-md);
++  font-weight: 600;
++  line-height: 1.4;
++}
++
++.src-card__meta {
++  margin: 0;
++  color: var(--color-muted);
++  font-size: var(--fs-xs);
++}
++
++.src-card__use {
++  margin: 6px 0 0;
++  color: var(--color-ink-2);
++  font-size: var(--fs-sm);
++  line-height: 1.55;
++}
++
++.src-card__note {
++  margin: 6px 0 0;
++  padding: 8px 11px;
++  border-left: 3px solid var(--color-accent-2);
++  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
++  background: var(--color-paper-2);
++  color: var(--color-ink-2);
++  font-size: var(--fs-sm);
++  line-height: 1.55;
++}
++
++.src-card__link {
++  display: inline-flex;
++  align-items: center;
++  gap: 5px;
++  margin-top: 8px;
++  color: var(--color-accent);
++  font-size: var(--fs-sm);
++  font-weight: 600;
++  text-decoration: none;
++}
++
++.src-card__link:hover {
++  text-decoration: underline;
++}
++
++/* Mục chưa có văn bản: viền đứt, cùng ngôn ngữ với pin toạ độ ước lượng. */
++.src-card--gap {
++  margin-top: var(--space-xs);
++  padding: var(--space-sm) var(--space-md);
++  border: 1px dashed oklch(50% 0.02 258 / 0.45);
++  border-radius: var(--radius-sm);
++  background: var(--color-paper-2);
++}
++
++.src-card--gap h3 {
++  margin-top: 0;
++}
++
++@media (max-width: 54rem) {
++  .src-sheet {
++    width: calc(100vw - 16px);
++    max-height: 86vh;
++    padding: var(--space-md);
++  }
++}

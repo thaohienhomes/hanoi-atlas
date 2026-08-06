@@ -1,0 +1,6092 @@
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { AREAS, CONTEXT_POINTS, COMPANY_INFO, DATA_SOURCES, STARTUPS } from "./data.js";
+import {
+  WEST_BANK,
+  EAST_BANK,
+  BAI_GIUA,
+  HO_TAY,
+  HO_TRUC_BACH,
+  HO_GUOM,
+  LAKES,
+  LAKE_FEATURES,
+  PARKS,
+  DISTRICTS,
+  METRO_LINES,
+  BOULEVARDS,
+  LANDMARKS,
+  BRIDGES,
+  pointInPoly,
+  inEllipse,
+  inWater,
+} from "./geo.js";
+
+const CENTER = { lat: 21.033, lng: 105.833 };
+const SCALE = { lat: 1180, lng: 1101 }; // lng compressed by cos(21°)
+const AREA_BY_ID = Object.fromEntries(AREAS.map((area) => [area.id, area]));
+
+const state = {
+  activeAreaId: "all",
+  selectedId: null,
+  labelsMode: window.matchMedia("(max-width: 54rem)").matches ? "key" : "all",
+  flight: null,
+};
+
+const canvas = document.querySelector("#scene");
+const labelsLayer = document.querySelector("#labelsLayer");
+const areaList = document.querySelector("#areaList");
+const detailCard = document.querySelector("#detailCard");
+const miniMapPoints = document.querySelector("#miniMapPoints");
+const searchInput = document.querySelector("#companySearch");
+const searchResults = document.querySelector("#searchResults");
+const searchTrigger = document.querySelector("#searchTrigger");
+const searchModal = document.querySelector("#searchModal");
+let searchActiveIndex = -1;
+const pinLegend = document.querySelector("#pinLegend");
+
+// Active-area description, moved under the selected row in the rail.
+const areaDescEl = document.createElement("p");
+areaDescEl.className = "area-desc";
+
+const HORIZON = 0xcfe6f2; // pale sky at the horizon; fog fades toward this
+
+function makeSkyTexture() {
+  const c = document.createElement("canvas");
+  c.width = 16;
+  c.height = 256;
+  const ctx = c.getContext("2d");
+  const grad = ctx.createLinearGradient(0, 0, 0, 256);
+  grad.addColorStop(0, "#6fa8d6"); // zenith
+  grad.addColorStop(0.45, "#9cc7e6");
+  grad.addColorStop(0.8, "#cfe6f2"); // horizon
+  grad.addColorStop(1, "#e4f0f6");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 16, 256);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+const scene = new THREE.Scene();
+scene.background = makeSkyTexture();
+scene.fog = new THREE.FogExp2(HORIZON, 0.0052);
+
+// Phones get a lighter GPU budget: capped pixel ratio and a smaller shadow map.
+const smallScreen = window.matchMedia("(max-width: 54rem)").matches;
+
+const camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.1, 500);
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, smallScreen ? 1.5 : 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.07;
+controls.minDistance = 18;
+controls.maxDistance = 140;
+controls.maxPolarAngle = Math.PI * 0.47;
+controls.screenSpacePanning = false;
+
+const clock = new THREE.Clock();
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+const UP = new THREE.Vector3(0, 1, 0);
+
+const markerMeshes = [];
+const startupMarkers = new Map();
+const labelElements = new Map();
+const labelDims = new Map();
+const landmarkLabelElements = [];
+const waterSurfaces = [];
+const vehicleFleet = [];
+const ferryFleet = [];
+const planeFleet = [];
+const subwayFleet = [];
+const birdFleet = [];
+let birdMesh = null;
+const sidewalkPlates = []; // block-plate centers, filled by createBuildings
+const pedFleet = [];
+let pedMesh = null;
+let pedRect = null;
+const treeBuffer = []; // { x, z, type: "conifer"|"round", scale, rot, colorIndex }
+let hoverCandidate = null;
+let pointerDown = null; // { x, y, item } captured on pointerdown to tell clicks from drags
+
+// Greenery palette: a spread of Hanoi park greens (xà cừ, sấu, bằng lăng...)
+// for per-instance tree color.
+const GREEN_PALETTE = [
+  0x3d6b39, 0x4a7d45, 0x557f42, 0x5e8a4c, 0x6d9a58, 0x7fa866, 0x4f7237,
+].map((c) => new THREE.Color(c));
+
+const colors = {
+  accent: new THREE.Color(0x2664ff),
+  cyan: new THREE.Color(0x33d6c7),
+  green: new THREE.Color(0x32bd7b),
+  yellow: new THREE.Color(0xffcc4d),
+  red: new THREE.Color(0xe54c42),
+  graphite: new THREE.Color(0x19202b),
+  land: new THREE.Color(0xd2cec2),
+  land2: new THREE.Color(0xc7c2b2),
+  road: new THREE.Color(0x2b2f38),
+  building: new THREE.Color(0xd9d6ca),
+  buildingDark: new THREE.Color(0x8e9899),
+};
+
+// Near-white concrete mottle multiplied over the land fills: block-scale
+// tonal blotches plus fine speckle, so the ground stops reading as one
+// flat sheet of beige. Generated once; zero per-frame cost.
+function makeGroundTexture() {
+  const c = document.createElement("canvas");
+  c.width = 512;
+  c.height = 512;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, 512, 512);
+  const rand = seededRandom(4242);
+  for (let i = 0; i < 70; i += 1) {
+    const r = 36 + rand() * 96;
+    const x = rand() * 512;
+    const y = rand() * 512;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    const warm = rand() > 0.5;
+    g.addColorStop(0, warm ? "rgba(150, 138, 116, 0.05)" : "rgba(96, 104, 116, 0.05)");
+    g.addColorStop(1, "rgba(120, 120, 120, 0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  }
+  for (let i = 0; i < 2400; i += 1) {
+    ctx.fillStyle = `rgba(72, 78, 88, ${0.012 + rand() * 0.03})`;
+    const s = 1 + rand() * 2.4;
+    ctx.fillRect(rand() * 512, rand() * 512, s, s);
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(0.22, 0.22);
+  tex.anisotropy = 4;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const groundTexture = makeGroundTexture();
+
+const materials = {
+  water: new THREE.MeshStandardMaterial({
+    color: 0x2a6488,
+    roughness: 0.4,
+    metalness: 0.18,
+  }),
+  land: new THREE.MeshStandardMaterial({
+    color: colors.land,
+    map: groundTexture,
+    roughness: 0.82,
+    side: THREE.DoubleSide,
+  }),
+  // Manhattan's ground plane IS the street surface; blocks sit on it as
+  // raised sidewalk plates, so streets need no line meshes at all.
+  asphalt: new THREE.MeshStandardMaterial({
+    color: 0x7a7e85,
+    map: groundTexture,
+    roughness: 0.96,
+    side: THREE.DoubleSide,
+  }),
+  landAlt: new THREE.MeshStandardMaterial({
+    color: colors.land2,
+    map: groundTexture,
+    roughness: 0.9,
+    side: THREE.DoubleSide,
+  }),
+  park: new THREE.MeshStandardMaterial({
+    color: 0x679c58,
+    roughness: 0.9,
+    side: THREE.DoubleSide,
+  }),
+  parkLight: new THREE.MeshStandardMaterial({
+    color: 0x86ad6c,
+    roughness: 0.92,
+    side: THREE.DoubleSide,
+  }),
+  parkDark: new THREE.MeshStandardMaterial({
+    color: 0x4c7847,
+    roughness: 0.95,
+    side: THREE.DoubleSide,
+  }),
+  path: new THREE.MeshStandardMaterial({
+    color: 0xd8cfaa,
+    roughness: 0.86,
+  }),
+  pond: new THREE.MeshStandardMaterial({
+    color: 0x467f9b,
+    roughness: 0.46,
+    metalness: 0.04,
+    side: THREE.DoubleSide,
+  }),
+  road: new THREE.MeshStandardMaterial({
+    color: 0x5b6068,
+    roughness: 0.82,
+  }),
+  street: new THREE.MeshStandardMaterial({
+    color: 0x767b82,
+    roughness: 0.86,
+  }),
+  rail: new THREE.MeshStandardMaterial({
+    color: 0xb7c0c6,
+    roughness: 0.6,
+  }),
+  bridge: new THREE.MeshStandardMaterial({
+    color: 0xd6c9a8,
+    roughness: 0.65,
+  }),
+  seawall: new THREE.MeshStandardMaterial({
+    color: 0xcfc6a8,
+    roughness: 0.8,
+  }),
+  building: new THREE.MeshStandardMaterial({
+    color: colors.building,
+    roughness: 0.72,
+  }),
+  roof: new THREE.MeshStandardMaterial({
+    color: 0x657071,
+    roughness: 0.7,
+  }),
+  roofColored: new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.74,
+  }),
+  treeLeaf: new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.92,
+    flatShading: true,
+  }),
+  treeTrunk: new THREE.MeshStandardMaterial({
+    color: 0x6b4f33,
+    roughness: 0.9,
+  }),
+  hill: new THREE.MeshStandardMaterial({
+    color: 0x63904f,
+    roughness: 0.96,
+    flatShading: true,
+  }),
+  glass: new THREE.MeshStandardMaterial({
+    color: 0x8fb4bd,
+    roughness: 0.26,
+    metalness: 0.1,
+    transparent: true,
+    opacity: 0.9,
+  }),
+  landmark: new THREE.MeshStandardMaterial({
+    color: 0xcfc8b8,
+    roughness: 0.55,
+  }),
+  copper: new THREE.MeshStandardMaterial({
+    color: 0x5fac85,
+    roughness: 0.62,
+    metalness: 0.04,
+  }),
+  subway: new THREE.MeshStandardMaterial({
+    color: 0x169b62,
+    roughness: 0.44,
+    emissive: new THREE.Color(0x072b19),
+  }),
+  ghost: new THREE.MeshStandardMaterial({
+    color: 0xd8d4c9,
+    roughness: 0.95,
+  }),
+  ferry: new THREE.MeshStandardMaterial({
+    color: 0xf4f1e8,
+    roughness: 0.48,
+  }),
+  plane: new THREE.MeshStandardMaterial({
+    color: 0xf0f4f6,
+    roughness: 0.4,
+  }),
+  window: new THREE.MeshStandardMaterial({
+    color: 0x36495c,
+    roughness: 0.38,
+    metalness: 0.08,
+    emissive: new THREE.Color(0x07121b),
+  }),
+  context: new THREE.MeshStandardMaterial({
+    color: 0xe8b500,
+    roughness: 0.62,
+    emissive: new THREE.Color(0x211600),
+  }),
+};
+
+function project(lat, lng, y = 0) {
+  return new THREE.Vector3((lng - CENTER.lng) * SCALE.lng, y, -(lat - CENTER.lat) * SCALE.lat);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function safeUrl(value) {
+  if (!value) return null;
+  const trimmed = String(value).trim();
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const url = new URL(withProtocol);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function logoPath(item) {
+  return `/logos/${item.id}.svg`;
+}
+
+function sourceLabel(item) {
+  if (item.source === "approx") return "Vị trí xấp xỉ · Approximate";
+  return "Chọn lọc thủ công · Curated";
+}
+
+function areaItems(areaId) {
+  if (areaId === "all") return STARTUPS;
+  return STARTUPS.filter((startup) => startup.area === areaId);
+}
+
+function stageColor(stage) {
+  if (stage === "Ẩm thực") return colors.yellow;
+  if (stage === "Du lịch") return colors.cyan;
+  if (stage === "BĐS") return colors.green;
+  return colors.accent;
+}
+
+// Compact tag shown on labels: ăn / chơi / ở.
+function stageTag(stage) {
+  if (stage === "Ẩm thực") return "Ăn";
+  if (stage === "Du lịch") return "Chơi";
+  if (stage === "BĐS") return "Ở";
+  return "";
+}
+
+function seededRandom(seed) {
+  let t = seed + 0x6d2b79f5;
+  return function random() {
+    t += 0x6d2b79f5;
+    let r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function makeShape(coords, material, y = 0, shadow = false, holes = []) {
+  const shape = new THREE.Shape();
+  coords.forEach(([lat, lng], index) => {
+    const p = project(lat, lng);
+    if (index === 0) shape.moveTo(p.x, p.z);
+    else shape.lineTo(p.x, p.z);
+  });
+  shape.closePath();
+  // Holes (the big lakes) punch through the landmass so the animated water
+  // plane below shows through as real water.
+  holes.forEach((holeCoords) => {
+    const path = new THREE.Path();
+    holeCoords.forEach(([lat, lng], index) => {
+      const p = project(lat, lng);
+      if (index === 0) path.moveTo(p.x, p.z);
+      else path.lineTo(p.x, p.z);
+    });
+    path.closePath();
+    shape.holes.push(path);
+  });
+  const geometry = new THREE.ShapeGeometry(shape);
+  geometry.rotateX(Math.PI / 2);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.y = y;
+  mesh.receiveShadow = shadow;
+  scene.add(mesh);
+  return mesh;
+}
+
+function makeTube(coords, radius, material, y = 0.05, segments = 80) {
+  const points = coords.map(([lat, lng]) => project(lat, lng, y));
+  const curve = new THREE.CatmullRomCurve3(points);
+  const geometry = new THREE.TubeGeometry(curve, segments, radius, 8, false);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+  return { mesh, points };
+}
+
+function makeCurveTube(points, radius, material, segments = 48) {
+  const curve = new THREE.CatmullRomCurve3(points);
+  const geometry = new THREE.TubeGeometry(curve, segments, radius, 8, false);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+  return mesh;
+}
+
+function createLights() {
+  const hemi = new THREE.HemisphereLight(0xdbefff, 0x4a4335, 2.75);
+  scene.add(hemi);
+
+  const sun = new THREE.DirectionalLight(0xffedc9, 3.45);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(smallScreen ? 1024 : 2048, smallScreen ? 1024 : 2048);
+  sun.shadow.camera.near = 2;
+  sun.shadow.camera.far = 220;
+  // The city footprint spans roughly x [-90, 80], z [-77, 57], so the shadow
+  // box is sized to cover the whole frame.
+  // The bias pair removes acne/peter-panning on the box facades.
+  sun.shadow.camera.left = -100;
+  sun.shadow.camera.right = 100;
+  sun.shadow.camera.top = 95;
+  sun.shadow.camera.bottom = -95;
+  sun.shadow.bias = -0.00035;
+  sun.shadow.normalBias = 0.02;
+  sun.target.position.set(-4, 0, -10);
+  sun.position.set(-4 - 52, 46, -10 + 40);
+  scene.add(sun.target);
+  scene.add(sun);
+
+  createSunGlow();
+}
+
+// A single additive glow sprite hanging in the sun's direction: gives the
+// sky a light source and the haze a reason, for the cost of one sprite.
+function createSunGlow() {
+  const c = document.createElement("canvas");
+  c.width = 256;
+  c.height = 256;
+  const ctx = c.getContext("2d");
+  const g = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
+  g.addColorStop(0, "rgba(255, 247, 224, 0.95)");
+  g.addColorStop(0.22, "rgba(255, 238, 200, 0.5)");
+  g.addColorStop(0.55, "rgba(255, 228, 184, 0.16)");
+  g.addColorStop(1, "rgba(255, 228, 184, 0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 256, 256);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: tex,
+      transparent: true,
+      opacity: 0.85,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      fog: false,
+    }),
+  );
+  // Same azimuth as the sun light, dropped near the horizon so orbiting
+  // cameras actually catch it over the Hudson.
+  sprite.position.set(-200, 82, 128);
+  sprite.scale.setScalar(170);
+  scene.add(sprite);
+}
+
+function createShoreline(coords) {
+  makeTube([...coords, coords[0]], 0.045, materials.seawall, 0.12, Math.max(48, coords.length * 14));
+}
+
+function createPier(lat, lng, width, depth, rotation = 0) {
+  const p = project(lat, lng, 0.08);
+  const group = new THREE.Group();
+  group.position.copy(p);
+  group.rotation.y = rotation;
+
+  const deck = new THREE.Mesh(new THREE.BoxGeometry(width, 0.16, depth), materials.seawall);
+  deck.position.y = 0.1;
+  deck.castShadow = true;
+  deck.receiveShadow = true;
+  group.add(deck);
+
+  const postGeo = new THREE.CylinderGeometry(0.055, 0.055, 0.42, 8);
+  for (const x of [-width * 0.38, width * 0.38]) {
+    for (const z of [-depth * 0.36, depth * 0.36]) {
+      const post = new THREE.Mesh(postGeo, materials.bridge);
+      post.position.set(x, -0.04, z);
+      post.castShadow = true;
+      group.add(post);
+    }
+  }
+  scene.add(group);
+}
+
+function ellipseCoords(lat, lng, latRadius, lngRadius, steps = 28) {
+  return Array.from({ length: steps }, (_, index) => {
+    const angle = (index / steps) * Math.PI * 2;
+    return [lat + Math.sin(angle) * latRadius, lng + Math.cos(angle) * lngRadius];
+  });
+}
+
+function createBlockAt(lat, lng, width, depth, height, material, rotation = 0, y = 0) {
+  const p = project(lat, lng, y);
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
+  mesh.position.set(p.x, y + height / 2, p.z);
+  mesh.rotation.y = rotation;
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+  return mesh;
+}
+
+function addLandmarkLabel(name, lat, lng, y = 3) {
+  const el = document.createElement("div");
+  el.className = "landmark-label";
+  el.textContent = name;
+  labelsLayer.appendChild(el);
+  landmarkLabelElements.push({ el, point: { lat, lng, y } });
+}
+
+// Queue a tree to be built later in one batched instanced draw.
+function addTree(lat, lng, random, { type, scaleBase = 1 } = {}) {
+  const p = project(lat, lng);
+  treeBuffer.push({
+    x: p.x,
+    z: p.z,
+    type: type || (random() < 0.42 ? "conifer" : "round"),
+    scale: scaleBase * (0.62 + random() * 0.7),
+    rot: random() * Math.PI,
+    colorIndex: Math.floor(random() * GREEN_PALETTE.length),
+  });
+}
+
+// Fill a polygon with trees at a given target count; optional water exclusion.
+function scatterTreesInPoly(poly, count, random, opts = {}) {
+  const lats = poly.map((c) => c[0]);
+  const lngs = poly.map((c) => c[1]);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs);
+  const maxLng = Math.max(...lngs);
+  let placed = 0;
+  let guard = 0;
+  const cap = count * 20;
+  while (placed < count && guard < cap) {
+    guard += 1;
+    const lat = minLat + random() * (maxLat - minLat);
+    const lng = minLng + random() * (maxLng - minLng);
+    if (!pointInPoly(lat, lng, poly)) continue;
+    if (opts.avoidWater && LAKE_FEATURES.some((f) => f.kind === "water" && inEllipse(lat, lng, f))) continue;
+    addTree(lat, lng, random, opts);
+    placed += 1;
+  }
+}
+
+// Build every queued tree into three instanced meshes (cones, blobs, trunks).
+// Street-tree rows where Hanoians would expect them: Phan Đình Phùng,
+// Hoàng Diệu, Thanh Niên, Kim Mã, and the river dyke road.
+function createStreetTrees() {
+  const rows = [
+    { from: [21.0402, 105.8392], to: [21.0426, 105.8472], step: 0.42 }, // Phan Đình Phùng
+    { from: [21.0398, 105.8397], to: [21.0422, 105.8477], step: 0.42 }, // Phan Đình Phùng, hàng kép
+    { from: [21.0302, 105.8372], to: [21.0398, 105.8382], step: 0.5 }, // Hoàng Diệu
+    { from: [21.0424, 105.8388], to: [21.0492, 105.8348], step: 0.45 }, // Thanh Niên
+    { from: [21.0304, 105.8028], to: [21.0338, 105.8298], step: 0.7 }, // Kim Mã
+    { from: [21.0555, 105.8458], to: [21.0295, 105.8598], step: 0.8 }, // đê Yên Phụ – Trần Quang Khải
+    { from: [21.0175, 105.842], to: [21.0255, 105.8408], step: 0.55 }, // Lê Duẩn
+  ];
+  const random = seededRandom(9001);
+  rows.forEach((row) => {
+    const a = project(row.from[0], row.from[1]);
+    const b = project(row.to[0], row.to[1]);
+    const count = Math.max(2, Math.floor(a.distanceTo(b) / row.step));
+    for (let i = 0; i <= count; i += 1) {
+      const t = i / count;
+      const lat = row.from[0] + (row.to[0] - row.from[0]) * t;
+      const lng = row.from[1] + (row.to[1] - row.from[1]) * t;
+      if (!pointInPoly(lat, lng, WEST_BANK)) continue;
+      if (LAKES.some((lake) => pointInPoly(lat, lng, lake))) continue;
+      const p = project(lat, lng);
+      treeBuffer.push({
+        x: p.x + (random() - 0.5) * 0.16,
+        z: p.z + (random() - 0.5) * 0.16,
+        type: "round",
+        scale: 0.48 + random() * 0.24,
+        rot: random() * Math.PI,
+        colorIndex: Math.floor(random() * GREEN_PALETTE.length),
+      });
+    }
+  });
+}
+
+function buildTrees() {
+  if (!treeBuffer.length) return;
+  const conifers = treeBuffer.filter((t) => t.type === "conifer");
+  const rounds = treeBuffer.filter((t) => t.type === "round");
+
+  const matrix = new THREE.Matrix4();
+  const quat = new THREE.Quaternion();
+  const scl = new THREE.Vector3();
+  const pos = new THREE.Vector3();
+  const col = new THREE.Color();
+
+  if (conifers.length) {
+    const geo = new THREE.ConeGeometry(0.16, 0.62, 6);
+    const mesh = new THREE.InstancedMesh(geo, materials.treeLeaf, conifers.length);
+    mesh.castShadow = true;
+    conifers.forEach((t, i) => {
+      pos.set(t.x, 0.31 * t.scale + 0.05, t.z);
+      quat.setFromAxisAngle(UP, t.rot);
+      scl.setScalar(t.scale);
+      matrix.compose(pos, quat, scl);
+      mesh.setMatrixAt(i, matrix);
+      col.copy(GREEN_PALETTE[t.colorIndex]);
+      mesh.setColorAt(i, col);
+    });
+    scene.add(mesh);
+  }
+
+  if (rounds.length) {
+    const leafGeo = new THREE.IcosahedronGeometry(0.24, 0);
+    const leafMesh = new THREE.InstancedMesh(leafGeo, materials.treeLeaf, rounds.length);
+    leafMesh.castShadow = true;
+    const trunkGeo = new THREE.CylinderGeometry(0.035, 0.05, 0.22, 5);
+    const trunkMesh = new THREE.InstancedMesh(trunkGeo, materials.treeTrunk, rounds.length);
+    trunkMesh.castShadow = true;
+    rounds.forEach((t, i) => {
+      const trunkH = 0.2 * t.scale;
+      pos.set(t.x, trunkH / 2 + 0.05, t.z);
+      quat.setFromAxisAngle(UP, 0);
+      scl.set(t.scale, t.scale, t.scale);
+      matrix.compose(pos, quat, scl);
+      trunkMesh.setMatrixAt(i, matrix);
+
+      pos.set(t.x, trunkH + 0.2 * t.scale + 0.05, t.z);
+      quat.setFromAxisAngle(UP, t.rot);
+      scl.set(t.scale, t.scale * 0.92, t.scale);
+      matrix.compose(pos, quat, scl);
+      leafMesh.setMatrixAt(i, matrix);
+      col.copy(GREEN_PALETTE[t.colorIndex]);
+      leafMesh.setColorAt(i, col);
+    });
+    scene.add(trunkMesh);
+    scene.add(leafMesh);
+  }
+}
+
+// Low-poly faceted grass mound for gentle, rolling terrain.
+function createHill(lat, lng, radius, height, tint = 0) {
+  const geo = new THREE.IcosahedronGeometry(1, 1);
+  const mat = materials.hill.clone();
+  if (tint) mat.color.offsetHSL(0, 0, tint);
+  const mesh = new THREE.Mesh(geo, mat);
+  const p = project(lat, lng);
+  mesh.scale.set(radius, height, radius);
+  mesh.position.set(p.x, 0.05, p.z); // equator at the grass plane; cap forms the hill
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+}
+
+// Thống Nhất park, the bãi giữa river islet, and the lakeside greens.
+function createParkDetails() {
+  const random = seededRandom(930);
+
+  // Gentle mounds in the bigger parks.
+  createHill(21.0145, 105.8432, 1.6, 0.22, 0.03); // Thống Nhất
+  createHill(21.0195, 105.8468, 1.3, 0.18, 0.0); // Thống Nhất bắc
+  createHill(21.0392, 105.8312, 1.2, 0.2, 0.04); // Bách Thảo
+
+  // Small lakes + lawns drawn as still water/light green on the land.
+  LAKE_FEATURES.forEach((f) => {
+    const coords = ellipseCoords(f.lat, f.lng, f.rLat, f.rLng, 30);
+    if (f.kind === "water") makeShape(coords, materials.pond, 0.085, true);
+    else makeShape(coords, materials.parkLight, 0.07, true);
+  });
+
+  // Bãi giữa: banana groves and vegetable plots on the sandbar.
+  makeShape(BAI_GIUA, materials.parkLight, 0.04, true);
+  scatterTreesInPoly(BAI_GIUA, 130, random, { type: "round", scaleBase: 0.9 });
+
+  // Canopy in the parks around the lakes.
+  scatterTreesInPoly(
+    [
+      [21.0435, 105.8378],
+      [21.0495, 105.8345],
+      [21.0492, 105.8398],
+      [21.0448, 105.843],
+    ],
+    26,
+    random,
+    { type: "round", scaleBase: 1.05 },
+  ); // Thanh Niên strip + Trúc Bạch banks
+
+  // Quảng An peninsula gardens.
+  scatterTreesInPoly(
+    [
+      [21.059, 105.8265],
+      [21.0655, 105.8255],
+      [21.0668, 105.831],
+      [21.0605, 105.8322],
+    ],
+    40,
+    random,
+    { type: "round" },
+  );
+}
+
+function createParks() {
+  PARKS.forEach((coords) => makeShape(coords, materials.park, 0.05, true));
+
+  const random = seededRandom(311);
+  PARKS.filter((p) => p.length >= 4).forEach((poly) => scatterTreesInPoly(poly, 18, random));
+}
+
+function createBaseMap() {
+  const waterGeo = new THREE.PlaneGeometry(260, 230, 80, 72);
+  const water = new THREE.Mesh(waterGeo, materials.water);
+  water.rotation.x = -Math.PI / 2;
+  water.position.y = -0.18;
+  water.receiveShadow = true;
+  water.userData.baseZ = waterGeo.attributes.position.array.slice();
+  scene.add(water);
+  waterSurfaces.push(water);
+
+  // Main city with the three big lakes punched out as real water.
+  makeShape(WEST_BANK, materials.asphalt, 0, true, LAKES);
+  createShoreline(WEST_BANK);
+  LAKES.forEach((lake) => createShoreline(lake));
+
+  makeShape(EAST_BANK, materials.landAlt, 0, true);
+  createShoreline(EAST_BANK);
+
+  makeShape(BAI_GIUA, materials.landAlt, 0.01, true);
+  createShoreline(BAI_GIUA);
+
+  createParks();
+  createParkDetails();
+
+  // Sông Hồng landings: Chương Dương Độ + Bát Tràng-bound jetties.
+  createPier(21.0375, 105.8595, 1.6, 0.4, -0.55);
+  createPier(21.0165, 105.864, 1.5, 0.38, -0.5);
+  createPier(21.0475, 105.8665, 1.4, 0.36, 2.6);
+}
+
+// The French-quarter grid is rotated only a few degrees off north. Build it
+// in a local frame and clip every segment to the west bank so streets never
+// run out over the water.
+const GRID = (() => {
+  const theta = (8 * Math.PI) / 180;
+  const k = Math.cos((21.03 * Math.PI) / 180); // lng compression
+  // unit vectors (in lat/lng degrees) for "north-south" and "east-west" streets
+  const av = { dlat: Math.cos(theta), dlng: Math.sin(theta) / k }; // along Phố Huế axis
+  const st = { dlat: Math.cos(theta + Math.PI / 2), dlng: Math.sin(theta + Math.PI / 2) / k };
+  const origin = { lat: 21.025, lng: 105.846 }; // Hỏa Lò corner
+  return { av, st, origin };
+})();
+
+// Lattice spacing shared by the buildings, the sidewalk plates, and the
+// traffic network, so traffic flows in the same gaps the blocks leave open.
+// Hanoi blocks are much smaller than Manhattan's.
+const CELL_U = 0.0009; // ~100 m between east-west streets
+const CELL_V = 0.0016; // ~170 m between north-south streets
+const GRID_METRICS = (() => {
+  const gridOrigin = project(GRID.origin.lat, GRID.origin.lng);
+  const uVec = project(
+    GRID.origin.lat + GRID.av.dlat * CELL_U,
+    GRID.origin.lng + GRID.av.dlng * CELL_U,
+  ).sub(gridOrigin); // short block side (street to street)
+  const vVec = project(
+    GRID.origin.lat + GRID.st.dlat * CELL_V,
+    GRID.origin.lng + GRID.st.dlng * CELL_V,
+  ).sub(gridOrigin); // long block side (avenue to avenue)
+  return {
+    uVec,
+    vVec,
+    uLen: uVec.length(),
+    vLen: vVec.length(),
+    rot: Math.atan2(uVec.x, uVec.z),
+  };
+})();
+
+// Long Biên rust for the old steel bridge; pale concrete elsewhere.
+const longBienSteel = new THREE.MeshStandardMaterial({ color: 0x6e6259, roughness: 0.72, metalness: 0.18 });
+
+function createBridgeDetails() {
+  const deckHeight = 0.62;
+  BRIDGES.forEach((bridge) => {
+    const isTruss = bridge.type === "truss";
+    const deckMaterial = isTruss ? longBienSteel : materials.bridge;
+
+    // Roadway / rail deck
+    const deckPts = bridge.deck.map(([lat, lng]) => project(lat, lng, deckHeight));
+    makeCurveTube(deckPts, isTruss ? 0.055 : 0.07, deckMaterial, 60);
+
+    // Piers under every deck vertex.
+    deckPts.forEach((p, index) => {
+      if (index === 0 || index === deckPts.length - 1) return;
+      const pier = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.075, deckHeight + 0.18, 8), deckMaterial);
+      pier.position.set(p.x, (deckHeight - 0.18) / 2, p.z);
+      pier.castShadow = true;
+      scene.add(pier);
+    });
+
+    if (isTruss) {
+      // Long Biên's cantilever humps: an arched top chord over each span,
+      // plus a lower parallel chord, sketching the famous silhouette.
+      for (let s = 0; s < deckPts.length - 1; s += 1) {
+        const a = deckPts[s].clone();
+        const b = deckPts[s + 1].clone();
+        const mid = new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
+        mid.y = deckHeight + 0.42;
+        makeCurveTube([a, mid, b], 0.03, longBienSteel, 26);
+        // Verticals tying the hump to the deck.
+        for (const t of [0.3, 0.5, 0.7]) {
+          const base = new THREE.Vector3().lerpVectors(a, b, t);
+          const arcY = deckHeight + 0.42 * Math.sin(Math.PI * t) * 0.92 + 0.02;
+          const post = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.014, 0.014, arcY - deckHeight, 6),
+            longBienSteel,
+          );
+          post.position.set(base.x, deckHeight + (arcY - deckHeight) / 2, base.z);
+          scene.add(post);
+        }
+      }
+    }
+
+    if (bridge.type === "cable") {
+      // Nhật Tân: five A-shaped pylons with fanned stays.
+      const pylonHeight = 1.7;
+      bridge.towers.forEach(([lat, lng]) => {
+        const p = project(lat, lng);
+        const pylon = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.11, pylonHeight, 6), materials.landmark);
+        pylon.position.set(p.x, deckHeight + pylonHeight / 2, p.z);
+        pylon.castShadow = true;
+        scene.add(pylon);
+        const top = new THREE.Vector3(p.x, deckHeight + pylonHeight, p.z);
+        // Fan of stays fore and aft along the deck direction.
+        const dir = new THREE.Vector3()
+          .subVectors(deckPts[deckPts.length - 1], deckPts[0])
+          .normalize();
+        for (const along of [-1.6, -0.9, 0.9, 1.6]) {
+          const anchor = new THREE.Vector3(p.x, deckHeight + 0.02, p.z).addScaledVector(dir, along);
+          makeCurveTube([top, anchor], 0.008, materials.rail, 6);
+        }
+      });
+    }
+  });
+}
+
+function createSubwayTrainMesh(color = 0x169b62) {
+  const group = new THREE.Group();
+  const carMaterial = new THREE.MeshStandardMaterial({ color: 0xe6eaec, roughness: 0.34, metalness: 0.1 });
+  const stripeMaterial = new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.4,
+    emissive: new THREE.Color(color).multiplyScalar(0.2),
+  });
+  for (let i = 0; i < 3; i += 1) {
+    const car = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.18, 0.62), carMaterial);
+    car.position.z = (i - 1) * 0.66;
+    car.position.y = 0.14;
+    car.castShadow = true;
+    group.add(car);
+
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.035, 0.5), stripeMaterial);
+    stripe.position.set(0, 0.2, (i - 1) * 0.66);
+    group.add(stripe);
+  }
+  group.scale.setScalar(0.7);
+  return group;
+}
+
+// Hanoi's two metro lines run entirely on elevated viaducts; the national
+// railway hugs the ground, then climbs onto Long Biên bridge over the river.
+const VIADUCT_Y = 0.58;
+const RAIL_BRIDGE_Y = 0.68;
+
+function trackY(line, lat, lng, baseY) {
+  if (line.mode === "viaduct") return VIADUCT_Y;
+  // "rail": ground ribbon on land, Long Biên deck height over the water.
+  return inWater(lat, lng) ? RAIL_BRIDGE_Y : baseY;
+}
+
+// Densely resampled route with a real vertical profile: viaducts across the
+// city, the railway rising onto the old bridge.
+function subwayProfile(line, baseY) {
+  const points = [];
+  const elevated = [];
+  const stops = line.stops;
+  for (let s = 0; s < stops.length - 1; s += 1) {
+    const [aLat, aLng] = stops[s];
+    const [bLat, bLng] = stops[s + 1];
+    const segs = Math.max(2, Math.round(project(aLat, aLng).distanceTo(project(bLat, bLng)) / 0.9));
+    for (let k = 0; k < segs; k += 1) {
+      const t = k / segs;
+      const lat = aLat + (bLat - aLat) * t;
+      const lng = aLng + (bLng - aLng) * t;
+      const y = trackY(line, lat, lng, baseY);
+      const point = project(lat, lng, y);
+      points.push(point);
+      if (y === VIADUCT_Y) elevated.push(point);
+    }
+  }
+  const [lastLat, lastLng] = stops[stops.length - 1];
+  points.push(project(lastLat, lastLng, trackY(line, lastLat, lastLng, baseY)));
+  return { points, elevated };
+}
+
+function createSubwayLayer() {
+  // MTA-diagram styling: white station discs with a dark rim over the
+  // colored route lines.
+  const stationMaterial = new THREE.MeshStandardMaterial({
+    color: 0xf6f7f4,
+    roughness: 0.4,
+    emissive: new THREE.Color(0x1a1a1a),
+  });
+  const stationRimMaterial = new THREE.MeshStandardMaterial({ color: 0x22262e, roughness: 0.6 });
+  const stationGeo = new THREE.CylinderGeometry(0.095, 0.095, 0.05, 16);
+  const stationRimGeo = new THREE.CylinderGeometry(0.13, 0.13, 0.036, 16);
+  const pierGeo = new THREE.CylinderGeometry(0.032, 0.05, 1, 8);
+  const pierMaterial = new THREE.MeshStandardMaterial({ color: 0x4b5158, roughness: 0.7 });
+
+  METRO_LINES.forEach((line, lineIndex) => {
+    const lineMaterial = new THREE.MeshStandardMaterial({
+      color: line.color,
+      roughness: 0.45,
+      emissive: new THREE.Color(line.color).multiplyScalar(0.3),
+    });
+    const y = 0.05 + lineIndex * 0.007; // tiny stagger so overlapping lines don't z-fight
+    const { points, elevated } = subwayProfile(line, y);
+    const curve = new THREE.CatmullRomCurve3(points);
+    const track = new THREE.Mesh(
+      new THREE.TubeGeometry(curve, points.length * 3, 0.04, 8, false),
+      lineMaterial,
+    );
+    track.castShadow = true;
+    track.receiveShadow = true;
+    scene.add(track);
+
+    // Viaduct piers hold the elevated stretches up.
+    elevated.forEach((point, index) => {
+      if (index % 2 !== 0) return;
+      const pier = new THREE.Mesh(pierGeo, pierMaterial);
+      pier.scale.y = point.y;
+      pier.position.set(point.x, point.y / 2, point.z);
+      pier.castShadow = true;
+      scene.add(pier);
+    });
+
+    line.stops.forEach(([lat, lng]) => {
+      const stationY = trackY(line, lat, lng, y);
+      if (stationY < 0 || inWater(lat, lng)) return; // no station discs over the river
+      const p = project(lat, lng, stationY + 0.035);
+      const rim = new THREE.Mesh(stationRimGeo, stationRimMaterial);
+      rim.position.copy(p);
+      scene.add(rim);
+      const disk = new THREE.Mesh(stationGeo, stationMaterial);
+      disk.position.copy(p);
+      disk.position.y += 0.02;
+      scene.add(disk);
+    });
+
+    // One train per line; the long trunk lines run a second. Trains ride the
+    // same profile, so the metro glides along its viaduct and the old diesel
+    // train climbs Long Biên bridge.
+    const trainCount = line.stops.length >= 8 ? 2 : 1;
+    for (let i = 0; i < trainCount; i += 1) {
+      const train = createSubwayTrainMesh(line.color);
+      scene.add(train);
+      subwayFleet.push({
+        mesh: train,
+        path: points,
+        t: lineIndex * 0.27 + i * 0.5,
+        speed: 0.016 + lineIndex * 0.002,
+      });
+    }
+  });
+
+  addLandmarkLabel("Ga Hà Nội", 21.0245, 105.8412, 1.6);
+  addLandmarkLabel("Ga Cát Linh", 21.0293, 105.8237, 1.5);
+}
+
+function createFerryMesh(accent = 0x2e6cff) {
+  const group = new THREE.Group();
+  const hullMaterial = new THREE.MeshStandardMaterial({ color: accent, roughness: 0.42 });
+  const cabinMaterial = materials.ferry;
+  const hull = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.16, 1.3), hullMaterial);
+  hull.position.y = 0.12;
+  hull.castShadow = true;
+  group.add(hull);
+
+  const cabin = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.28, 0.6), cabinMaterial);
+  cabin.position.y = 0.34;
+  cabin.castShadow = true;
+  group.add(cabin);
+
+  const bow = new THREE.Mesh(new THREE.ConeGeometry(0.36, 0.42, 4), hullMaterial);
+  bow.rotation.x = Math.PI / 2;
+  bow.rotation.z = Math.PI / 4;
+  bow.position.set(0, 0.12, 0.82);
+  group.add(bow);
+  group.scale.setScalar(0.86);
+  return group;
+}
+
+function createFerries() {
+  const routes = [
+    {
+      // Sand barge working up the Red River's main channel, west of bãi giữa.
+      color: 0x8a5f46,
+      scale: 1,
+      path: [
+        [20.988, 105.876],
+        [21.008, 105.87],
+        [21.025, 105.8655],
+        [21.038, 105.8618],
+        [21.048, 105.856],
+        [21.058, 105.85],
+        [21.066, 105.844],
+      ],
+    },
+    {
+      // Tourist boat looping the east channel past Long Biên bridge.
+      color: 0x2e6cff,
+      scale: 0.8,
+      path: [
+        [21.033, 105.864],
+        [21.039, 105.869],
+        [21.0445, 105.8695],
+        [21.0505, 105.8645],
+        [21.056, 105.8575],
+        [21.052, 105.8545],
+        [21.0455, 105.8595],
+        [21.038, 105.8625],
+        [21.033, 105.864],
+      ],
+    },
+    {
+      // Swan pedal boat drifting on Hồ Tây.
+      color: 0xf4f1e8,
+      scale: 0.55,
+      path: [
+        [21.052, 105.818],
+        [21.056, 105.824],
+        [21.06, 105.829],
+        [21.056, 105.832],
+        [21.05, 105.83],
+        [21.047, 105.824],
+        [21.052, 105.818],
+      ],
+    },
+  ];
+  routes.forEach((route, index) => {
+    const points = route.path.map(([lat, lng]) => project(lat, lng, 0.1));
+    const mesh = createFerryMesh(route.color);
+    mesh.add(createWake());
+    mesh.scale.setScalar(0.86 * (route.scale ?? 1));
+    scene.add(mesh);
+    ferryFleet.push({ mesh, path: points, t: index * 0.43, speed: 0.009 + index * 0.003, lane: 0 });
+  });
+}
+
+// A soft white trail that rides behind each ferry; static texture, no
+// per-frame updates, it just travels with its parent.
+function createWake() {
+  const c = document.createElement("canvas");
+  c.width = 64;
+  c.height = 128;
+  const ctx = c.getContext("2d");
+  // After the plane is laid flat (rotation.x = -PI/2) the canvas bottom edge
+  // faces the stern, so the bright end of the trail lives at y = 128.
+  const grad = ctx.createLinearGradient(0, 0, 0, 128);
+  grad.addColorStop(0, "rgba(255,255,255,0)");
+  grad.addColorStop(0.65, "rgba(255,255,255,0.3)");
+  grad.addColorStop(1, "rgba(255,255,255,0.75)");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 64, 128);
+  const tex = new THREE.CanvasTexture(c);
+  const wake = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.42, 1.7),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.55, depthWrite: false }),
+  );
+  wake.rotation.x = -Math.PI / 2;
+  wake.position.set(0, -0.05, -1.25);
+  return wake;
+}
+
+function createPlaneMesh() {
+  const group = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.22, 1.6), materials.plane);
+  body.castShadow = true;
+  group.add(body);
+  const wing = new THREE.Mesh(new THREE.BoxGeometry(1.45, 0.05, 0.34), materials.plane);
+  wing.position.z = -0.08;
+  group.add(wing);
+  const tail = new THREE.Mesh(new THREE.BoxGeometry(0.65, 0.05, 0.22), materials.plane);
+  tail.position.z = -0.66;
+  tail.position.y = 0.16;
+  group.add(tail);
+  group.scale.setScalar(0.9);
+  return group;
+}
+
+function createPlanes() {
+  // Approach and departure paths for Nội Bài, following the river valley.
+  const flightPaths = [
+    [
+      [20.988, 105.885, 16],
+      [21.03, 105.858, 18],
+      [21.07, 105.828, 20],
+      [21.097, 105.812, 22],
+    ],
+    [
+      [21.097, 105.862, 24],
+      [21.05, 105.82, 22],
+      [20.988, 105.788, 20],
+    ],
+  ];
+  flightPaths.forEach((path, index) => {
+    const mesh = createPlaneMesh();
+    scene.add(mesh);
+    planeFleet.push({
+      mesh,
+      path: path.map(([lat, lng, y]) => project(lat, lng, y)),
+      t: index * 0.48,
+      speed: 0.01 + index * 0.003,
+    });
+  });
+}
+
+// Streets ARE the gaps between the sidewalk block plates, so traffic paths
+// are generated on the same lattice the buildings use: every avenue with
+// enough land under it, the major crosstown streets, the two shoreline
+// highways, and the bridge decks. Every path is clipped to land, so cars
+// never drive through buildings, parks, or water.
+const ROAD_Y = 0.055;
+
+function streetAllowed(lat, lng) {
+  if (!pointInPoly(lat, lng, WEST_BANK)) return false;
+  for (const lake of LAKES) {
+    if (pointInPoly(lat, lng, lake)) return false;
+  }
+  for (const park of PARKS) {
+    if (pointInPoly(lat, lng, park)) return false;
+  }
+  for (const f of LAKE_FEATURES) {
+    if (f.kind === "water" && inEllipse(lat, lng, f)) return false;
+  }
+  return true;
+}
+
+function gridStreetPoint(u, v, y) {
+  const lat = GRID.origin.lat + GRID.av.dlat * u + GRID.st.dlat * v;
+  const lng = GRID.origin.lng + GRID.av.dlng * u + GRID.st.dlng * v;
+  return { lat, lng, point: project(lat, lng, y) };
+}
+
+function createStreetNetwork() {
+  const paths = [];
+  const flushRun = (run, minLength) => {
+    if (run.length >= minLength) paths.push(run);
+    return [];
+  };
+
+  // North-south lattice streets, broken at lakes, parks, and water.
+  for (let j = -18; j <= 18; j += 1) {
+    let run = [];
+    for (let i = -34; i <= 26; i += 1) {
+      const { lat, lng, point } = gridStreetPoint(i * CELL_U, j * CELL_V, ROAD_Y);
+      if (streetAllowed(lat, lng)) run.push(point);
+      else run = flushRun(run, 6);
+    }
+    flushRun(run, 6);
+  }
+
+  // Major east-west streets: Đại Cồ Việt, Trần Hưng Đạo, Tràng Thi,
+  // Hàng Bông, Hàng Mã, Phan Đình Phùng.
+  for (const i of [-26, -16, -8, 0, 7, 13, 18]) {
+    let run = [];
+    for (let j = -18; j <= 18; j += 0.5) {
+      const { lat, lng, point } = gridStreetPoint(i * CELL_U, j * CELL_V, ROAD_Y);
+      if (streetAllowed(lat, lng)) run.push(point);
+      else run = flushRun(run, 5);
+    }
+    flushRun(run, 5);
+  }
+
+  // Boulevards: the dyke road, Thanh Niên, and the big radials. Drawn as
+  // subtle ribbons so the scatter districts read as connected city, and
+  // used as traffic paths so motorbikes flow along them.
+  BOULEVARDS.forEach((boulevard) => {
+    makeTube(boulevard.path, 0.055, materials.road, 0.028, Math.max(40, boulevard.path.length * 10));
+    paths.push(boulevard.path.map(([lat, lng]) => project(lat, lng, ROAD_Y)));
+  });
+
+  // Bridge decks carry their own traffic, up at deck height.
+  BRIDGES.forEach((bridge) => {
+    paths.push(bridge.deck.map(([lat, lng]) => project(lat, lng, 0.72)));
+  });
+
+  createBridgeDetails();
+  return paths;
+}
+
+function buildingAllowed(lat, lng) {
+  // Must be on a real landmass (bãi giữa stays unbuilt — it's farmland)...
+  const onLand = pointInPoly(lat, lng, WEST_BANK) || pointInPoly(lat, lng, EAST_BANK);
+  if (!onLand) return false;
+  // ...and not in a lake...
+  for (const lake of LAKES) {
+    if (pointInPoly(lat, lng, lake)) return false;
+  }
+  for (const f of LAKE_FEATURES) {
+    if (f.kind === "water" && inEllipse(lat, lng, f)) return false;
+  }
+  // ...and not inside a park or monument ground.
+  for (const park of PARKS) {
+    if (pointInPoly(lat, lng, park)) return false;
+  }
+  return true;
+}
+
+// Bake a "street canyon" gradient into a unit box: vertices near the base get
+// darker vertex colors, which multiply with per-instance colors for free
+// ambient-occlusion-style grounding (no per-frame cost).
+function bakeBaseShade(geometry, floor = 0.78) {
+  const pos = geometry.attributes.position;
+  const shades = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i += 1) {
+    const t = Math.min(1, Math.max(0, (pos.getY(i) + 0.5) / 0.45));
+    const shade = floor + (1 - floor) * t;
+    shades[i * 3] = shade;
+    shades[i * 3 + 1] = shade;
+    shades[i * 3 + 2] = shade;
+  }
+  geometry.setAttribute("color", new THREE.BufferAttribute(shades, 3));
+  return geometry;
+}
+
+function createBuildings() {
+  const random = seededRandom(43);
+  const instances = [];
+
+  // Manhattan buildings live INSIDE street blocks, aligned to the same
+  // lattice the visible grid draws. Shared block placement is what makes the
+  // city read as a real city instead of scattered boxes.
+  const { uVec, vVec, uLen, vLen, rot: gridRot } = GRID_METRICS;
+
+  const filledCells = new Set();
+  const blockPlates = []; // one raised sidewalk plate per city block
+  DISTRICTS.filter((district) => !district.faded && !district.scatter).forEach((district) => {
+    const [latMin, latMax, lngMin, lngMax] = district.bbox;
+    for (let i = -34; i <= 26; i += 1) {
+      for (let j = -18; j <= 18; j += 1) {
+        const u = (i + 0.5) * CELL_U;
+        const v = (j + 0.5) * CELL_V;
+        const lat = GRID.origin.lat + GRID.av.dlat * u + GRID.st.dlat * v;
+        const lng = GRID.origin.lng + GRID.av.dlng * u + GRID.st.dlng * v;
+        if (lat < latMin || lat > latMax || lng < lngMin || lng > lngMax) continue;
+        const key = `${i}:${j}`;
+        if (filledCells.has(key)) continue;
+        if (!buildingAllowed(lat, lng)) continue;
+        filledCells.add(key);
+        const center = project(lat, lng);
+        blockPlates.push({ x: center.x, z: center.z });
+        // Tube-house Hanoi: the Old Quarter packs 4-5 skinny lots per block,
+        // the French quarter 2-3 wider ones; a few stay vacant.
+        const lots = district.slim ? 4 + (random() < 0.5 ? 1 : 0) : random() < 0.3 ? 3 : 2;
+        for (let slot = 0; slot < lots; slot += 1) {
+          if (random() < 0.09) continue;
+          const tall = random() < district.tall;
+          const base = district.h[0];
+          const span = district.h[1] - district.h[0];
+          // Bias toward shorter buildings; only "tall" picks reach the top.
+          const h = tall ? base + (0.55 + random() * 0.45) * span : base + Math.pow(random(), 1.7) * span * 0.7;
+          const slotT = (slot + 0.5) / lots - 0.5;
+          const p = center
+            .clone()
+            .addScaledVector(vVec, slotT * 0.8)
+            .addScaledVector(uVec, (random() - 0.5) * 0.08);
+          const grow = tall ? 1.12 : 1;
+          const w = Math.min(vLen * 0.42, ((vLen * 0.78) / lots) * (0.68 + random() * 0.24) * grow);
+          const d = uLen * (0.5 + random() * 0.15) * grow;
+          instances.push({ x: p.x, z: p.z, h, w, d, rot: gridRot, shade: random(), roof: random(), faded: false });
+        }
+      }
+    }
+  });
+
+  // Beyond the grid, each district scatters solid buildings that share one
+  // street orientation (with a whisper of jitter) and never interpenetrate.
+  // Districts across the river are the same, but render as faded ghosts.
+  DISTRICTS.filter((district) => district.faded || district.scatter).forEach((district) => {
+    const [latMin, latMax, lngMin, lngMax] = district.bbox;
+    const placedSpots = [];
+    let count = 0;
+    let guard = 0;
+    const cap = district.count * 16;
+    while (count < district.count && guard < cap) {
+      guard += 1;
+      const lat = latMin + random() * (latMax - latMin);
+      const lng = lngMin + random() * (lngMax - lngMin);
+      if (!buildingAllowed(lat, lng)) continue;
+      const p = project(lat, lng);
+      const w = 0.3 + random() * 0.55;
+      const d = 0.3 + random() * 0.6;
+      const r = Math.max(w, d) * 0.72;
+      if (
+        placedSpots.some(
+          (q) => (q.x - p.x) * (q.x - p.x) + (q.z - p.z) * (q.z - p.z) < (q.r + r) * (q.r + r) * 0.62,
+        )
+      )
+        continue;
+      placedSpots.push({ x: p.x, z: p.z, r });
+      const tall = random() < (district.tall ?? 0);
+      const base = district.h[0];
+      const span = district.h[1] - district.h[0];
+      const h = tall ? base + (0.6 + random() * 0.4) * span : base + Math.pow(random(), 1.6) * span * 0.72;
+      instances.push({
+        x: p.x,
+        z: p.z,
+        h,
+        w: tall ? w * 1.15 : w,
+        d: tall ? d * 1.15 : d,
+        rot: gridRot + (district.rot ?? 0) + (random() - 0.5) * 0.1,
+        shade: random(),
+        roof: random(),
+        faded: Boolean(district.faded),
+      });
+      count += 1;
+    }
+  });
+
+  // Faded outer-borough buildings render as flat, pale "ghost" blocks.
+  const fadedBoxes = instances.filter((b) => b.faded);
+  const solidBoxes = instances.filter((b) => !b.faded);
+  if (fadedBoxes.length) {
+    const ghostGeo = bakeBaseShade(new THREE.BoxGeometry(1, 1, 1), 0.88);
+    // Clone: landmark blocks reuse these materials with plain geometry, and
+    // vertexColors on a geometry without a color attribute renders black.
+    const ghostMaterial = materials.ghost.clone();
+    ghostMaterial.vertexColors = true;
+    const ghostMesh = new THREE.InstancedMesh(ghostGeo, ghostMaterial, fadedBoxes.length);
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const s = new THREE.Vector3();
+    const pp = new THREE.Vector3();
+    fadedBoxes.forEach((box, i) => {
+      pp.set(box.x, box.h / 2, box.z);
+      q.setFromAxisAngle(UP, box.rot);
+      s.set(box.w, box.h, box.d);
+      m.compose(pp, q, s);
+      ghostMesh.setMatrixAt(i, m);
+    });
+    ghostMesh.renderOrder = 1;
+    scene.add(ghostMesh);
+  }
+
+  // Solid (Manhattan) buildings keep full detail: palette, roofs, windows.
+  instances.length = 0;
+  instances.push(...solidBoxes);
+
+  const geometry = bakeBaseShade(new THREE.BoxGeometry(1, 1, 1));
+  const buildingMaterial = materials.building.clone();
+  buildingMaterial.vertexColors = true;
+  const mesh = new THREE.InstancedMesh(geometry, buildingMaterial, instances.length);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  const matrix = new THREE.Matrix4();
+  const quat = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+  const pos = new THREE.Vector3();
+  // A small palette of Hanoi facade tones: colonial yellow, cream plaster,
+  // weathered concrete, mint, and the glass of the new towers.
+  const palette = [
+    new THREE.Color(0xe8d79c), // colonial ochre yellow
+    new THREE.Color(0xdec98f), // deeper French yellow
+    new THREE.Color(0xe9e2cd), // cream plaster
+    new THREE.Color(0xb8bcb2), // weathered concrete
+    new THREE.Color(0xa6b4bf), // cool tower glass
+    new THREE.Color(0xcfd8c4), // faded mint
+  ];
+  const color = new THREE.Color();
+  // Roof tones: lots of terracotta tile and oxide red over the low city.
+  const roofPalette = [
+    new THREE.Color(0x646c75), // slate
+    new THREE.Color(0x565e66), // dark slate
+    new THREE.Color(0xa05a40), // terracotta tile
+    new THREE.Color(0x83493c), // oxide red
+    new THREE.Color(0x5f6a5a), // weathered green
+    new THREE.Color(0x968e7d), // tar/gravel
+  ];
+  const roofColor = new THREE.Color();
+
+  const roofMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), materials.roofColored, instances.length);
+  roofMesh.castShadow = true;
+  roofMesh.receiveShadow = true;
+  let roofCount = 0;
+
+  const windowMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), materials.window, instances.length * 22);
+  windowMesh.castShadow = false;
+  windowMesh.receiveShadow = true;
+  let windowCount = 0;
+
+  const storefrontMesh = new THREE.InstancedMesh(
+    new THREE.BoxGeometry(1, 1, 1),
+    new THREE.MeshStandardMaterial({ color: 0x2e343c, roughness: 0.35, metalness: 0.08 }),
+    instances.length,
+  );
+  storefrontMesh.castShadow = false;
+  storefrontMesh.receiveShadow = true;
+  let storefrontCount = 0;
+
+  // Rooftop detail collected during the main pass, instanced afterwards:
+  // wedding-cake setback tiers, wooden water tanks, and AC units.
+  const tiers = [];
+  const tanks = [];
+  const acUnits = [];
+  const rooftopOffset = new THREE.Vector3();
+
+  instances.forEach((box, index) => {
+    pos.set(box.x, box.h / 2, box.z);
+    quat.setFromAxisAngle(UP, box.rot);
+    scale.set(box.w, box.h, box.d);
+    matrix.compose(pos, quat, scale);
+    mesh.setMatrixAt(index, matrix);
+    // Tall buildings skew glassy/cool; low/mid skew stone & brick.
+    let tone;
+    if (box.h > 2.4) tone = box.shade < 0.5 ? palette[4] : palette[2];
+    else if (box.h > 1.3) tone = palette[[2, 4, 0, 5][Math.floor(box.shade * 4) % 4]];
+    else tone = palette[[0, 1, 3, 5][Math.floor(box.shade * 4) % 4]];
+    color.copy(tone).offsetHSL(0, 0, (box.shade - 0.5) * 0.06);
+    mesh.setColorAt(index, color);
+
+    // Classic NYC setback: taller towers step in for their top section.
+    const tiered = box.h > 2.6 && box.roof > 0.35;
+    if (tiered) {
+      tiers.push({
+        x: box.x,
+        z: box.z,
+        rot: box.rot,
+        w: box.w * 0.62,
+        d: box.d * 0.62,
+        y: box.h,
+        h: Math.min(1.6, box.h * 0.28),
+        color: color.clone().offsetHSL(0, 0, 0.03),
+      });
+    }
+    const roofTopY = tiered ? box.h + tiers[tiers.length - 1].h : box.h;
+    const roofW = tiered ? box.w * 0.62 : box.w;
+    const roofD = tiered ? box.d * 0.62 : box.d;
+
+    if (box.roof > 0.5 || box.h > 4.4) {
+      pos.set(box.x, roofTopY + 0.08, box.z);
+      scale.set(roofW * (0.46 + box.roof * 0.28), 0.12, roofD * (0.44 + box.roof * 0.26));
+      matrix.compose(pos, quat, scale);
+      roofMesh.setMatrixAt(roofCount, matrix);
+      // Mostly muted slate/gravel; ~30% get a warmer terracotta/red/green pop.
+      const warm = box.shade > 0.84 && box.h < 2.2;
+      roofColor.copy(roofPalette[warm ? 2 + (Math.floor(box.roof * 3) % 3) : box.roof > 0.5 ? 0 : 5]);
+      roofMesh.setColorAt(roofCount, roofColor);
+      roofCount += 1;
+    }
+
+    // Inox water tanks on a share of the mid-rise stock, AC boxes on most
+    // roofs: the two props that make aerial Hanoi read as Hanoi.
+    if (!tiered && box.h > 1.05 && box.h <= 2.6 && box.roof > 0.58) {
+      rooftopOffset.set(box.w * 0.2, 0, box.d * 0.16).applyAxisAngle(UP, box.rot);
+      tanks.push({ x: box.x + rooftopOffset.x, z: box.z + rooftopOffset.z, y: box.h, s: 0.8 + box.shade * 0.5 });
+    }
+    if (box.h > 0.85 && box.shade > 0.42) {
+      rooftopOffset.set(-box.w * 0.21, 0, box.d * 0.2).applyAxisAngle(UP, box.rot);
+      acUnits.push({ x: box.x + rooftopOffset.x, z: box.z + rooftopOffset.z, y: roofTopY, rot: box.rot });
+      if (box.shade > 0.78 && !tiered) {
+        rooftopOffset.set(box.w * 0.24, 0, -box.d * 0.18).applyAxisAngle(UP, box.rot);
+        acUnits.push({ x: box.x + rooftopOffset.x, z: box.z + rooftopOffset.z, y: box.h, rot: box.rot + 0.5 });
+      }
+    }
+
+    const front = new THREE.Vector3(Math.sin(box.rot), 0, Math.cos(box.rot));
+    const side = new THREE.Vector3(Math.cos(box.rot), 0, -Math.sin(box.rot));
+
+    if (box.h > 1.7) {
+      const floors = Math.min(5, Math.floor(box.h / 1.05));
+      // Taller buildings get bands on all four faces; mid-rises on two.
+      const allFaces = box.h > 2.2;
+      for (let floor = 1; floor <= floors; floor += 1) {
+        const y = Math.min(box.h - 0.35, floor * (box.h / (floors + 1)));
+        pos.set(box.x, y, box.z).addScaledVector(front, box.d / 2 + 0.018);
+        scale.set(box.w * 0.72, 0.035, 0.02);
+        matrix.compose(pos, quat, scale);
+        windowMesh.setMatrixAt(windowCount, matrix);
+        windowCount += 1;
+
+        pos.set(box.x, y + 0.1, box.z).addScaledVector(side, box.w / 2 + 0.018);
+        scale.set(0.02, 0.035, box.d * 0.7);
+        matrix.compose(pos, quat, scale);
+        windowMesh.setMatrixAt(windowCount, matrix);
+        windowCount += 1;
+
+        if (allFaces) {
+          pos.set(box.x, y + 0.05, box.z).addScaledVector(front, -(box.d / 2 + 0.018));
+          scale.set(box.w * 0.72, 0.035, 0.02);
+          matrix.compose(pos, quat, scale);
+          windowMesh.setMatrixAt(windowCount, matrix);
+          windowCount += 1;
+
+          pos.set(box.x, y + 0.15, box.z).addScaledVector(side, -(box.w / 2 + 0.018));
+          scale.set(0.02, 0.035, box.d * 0.7);
+          matrix.compose(pos, quat, scale);
+          windowMesh.setMatrixAt(windowCount, matrix);
+          windowCount += 1;
+        }
+      }
+    }
+
+    // Street-level storefront glazing on the avenue-facing side.
+    if (box.h > 0.55 && box.shade > 0.25) {
+      pos.set(box.x, 0.13, box.z).addScaledVector(front, box.d / 2 + 0.012);
+      scale.set(box.w * 0.78, 0.22, 0.02);
+      matrix.compose(pos, quat, scale);
+      storefrontMesh.setMatrixAt(storefrontCount, matrix);
+      storefrontCount += 1;
+    }
+  });
+  scene.add(mesh);
+  roofMesh.count = roofCount;
+  scene.add(roofMesh);
+  windowMesh.count = windowCount;
+  scene.add(windowMesh);
+  storefrontMesh.count = storefrontCount;
+  scene.add(storefrontMesh);
+
+  // Keep the plate centers around: pedestrians walk their perimeters.
+  sidewalkPlates.length = 0;
+  sidewalkPlates.push(...blockPlates);
+
+  // Sidewalk plates: the city blocks themselves, floated just above the
+  // asphalt ground so the streets are the gaps between them. Avenue gaps run
+  // wider than cross-street gaps, like the real grid.
+  if (blockPlates.length) {
+    const plateMesh = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(1, 0.06, 1),
+      new THREE.MeshStandardMaterial({ color: 0xd7d3c7, roughness: 0.9 }),
+      blockPlates.length,
+    );
+    plateMesh.receiveShadow = true;
+    const plateColor = new THREE.Color();
+    blockPlates.forEach((plate, i) => {
+      pos.set(plate.x, 0, plate.z);
+      quat.setFromAxisAngle(UP, gridRot);
+      scale.set(vLen - 0.26, 1, uLen - 0.12);
+      matrix.compose(pos, quat, scale);
+      plateMesh.setMatrixAt(i, matrix);
+      plateColor.setHSL(0.09, 0.06, 0.8 + ((i * 2654435761) % 100) / 100 * 0.05);
+      plateMesh.setColorAt(i, plateColor);
+    });
+    scene.add(plateMesh);
+  }
+
+  if (tiers.length) {
+    const tierMesh = new THREE.InstancedMesh(geometry, buildingMaterial, tiers.length);
+    tierMesh.castShadow = true;
+    tierMesh.receiveShadow = true;
+    tiers.forEach((tier, i) => {
+      pos.set(tier.x, tier.y + tier.h / 2, tier.z);
+      quat.setFromAxisAngle(UP, tier.rot);
+      scale.set(tier.w, tier.h, tier.d);
+      matrix.compose(pos, quat, scale);
+      tierMesh.setMatrixAt(i, matrix);
+      tierMesh.setColorAt(i, tier.color);
+    });
+    scene.add(tierMesh);
+  }
+
+  if (tanks.length) {
+    // Bồn inox: the stainless drums on every other Hanoi rooftop.
+    const barrelMesh = new THREE.InstancedMesh(
+      new THREE.CylinderGeometry(0.062, 0.062, 0.15, 10),
+      new THREE.MeshStandardMaterial({ color: 0xc9cfd4, roughness: 0.35, metalness: 0.55 }),
+      tanks.length,
+    );
+    const lidMesh = new THREE.InstancedMesh(
+      new THREE.SphereGeometry(0.062, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2),
+      new THREE.MeshStandardMaterial({ color: 0xb8bfc5, roughness: 0.4, metalness: 0.5 }),
+      tanks.length,
+    );
+    barrelMesh.castShadow = true;
+    lidMesh.castShadow = true;
+    quat.identity();
+    tanks.forEach((tank, i) => {
+      scale.setScalar(tank.s);
+      pos.set(tank.x, tank.y + 0.075 * tank.s, tank.z);
+      matrix.compose(pos, quat, scale);
+      barrelMesh.setMatrixAt(i, matrix);
+      pos.set(tank.x, tank.y + 0.15 * tank.s, tank.z);
+      matrix.compose(pos, quat, scale);
+      lidMesh.setMatrixAt(i, matrix);
+    });
+    scene.add(barrelMesh);
+    scene.add(lidMesh);
+  }
+
+  if (acUnits.length) {
+    const acMesh = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(0.095, 0.05, 0.075),
+      new THREE.MeshStandardMaterial({ color: 0xc3c8ce, roughness: 0.7 }),
+      acUnits.length,
+    );
+    acUnits.forEach((unit, i) => {
+      pos.set(unit.x, unit.y + 0.025, unit.z);
+      quat.setFromAxisAngle(UP, unit.rot);
+      scale.setScalar(1);
+      matrix.compose(pos, quat, scale);
+      acMesh.setMatrixAt(i, matrix);
+    });
+    scene.add(acMesh);
+  }
+}
+
+// Helper: a tapered tower with optional setbacks. Returns top Y.
+function stackTower(lat, lng, levels, material, rotation = 0) {
+  const p = project(lat, lng);
+  let y = 0;
+  levels.forEach((lvl) => {
+    const box = new THREE.Mesh(new THREE.BoxGeometry(lvl.w, lvl.h, lvl.d), lvl.material || material);
+    box.position.set(p.x, y + lvl.h / 2, p.z);
+    box.rotation.y = rotation;
+    box.castShadow = true;
+    box.receiveShadow = true;
+    scene.add(box);
+    y += lvl.h;
+  });
+  return { p, top: y };
+}
+
+// Hanoi accent materials.
+// Landmark towers need deeper glass than the shared material, or they wash
+// out against the fog when seen from across the city.
+const towerGlass = new THREE.MeshStandardMaterial({
+  color: 0x4f7d9c,
+  roughness: 0.24,
+  metalness: 0.3,
+  emissive: new THREE.Color(0x0d1e2a),
+});
+const templeRed = new THREE.MeshStandardMaterial({ color: 0xa8352a, roughness: 0.55 });
+const templeRedBright = new THREE.MeshStandardMaterial({
+  color: 0xc4382b,
+  roughness: 0.4,
+  emissive: new THREE.Color(0x380d08),
+});
+const lacquerYellow = new THREE.MeshStandardMaterial({ color: 0xd9b358, roughness: 0.5 });
+const graniteDark = new THREE.MeshStandardMaterial({ color: 0x5c6058, roughness: 0.62 });
+const brickAncient = new THREE.MeshStandardMaterial({ color: 0x9b5a41, roughness: 0.78 });
+
+// A little Vietnamese temple/pagoda block: walls + oversailing tiled roof.
+function addTempleBlock(x, z, w, d, wallH, material, roofMaterial, rotation = 0, y = 0) {
+  const group = new THREE.Group();
+  const wall = new THREE.Mesh(new THREE.BoxGeometry(w, wallH, d), material);
+  wall.position.y = y + wallH / 2;
+  wall.castShadow = true;
+  group.add(wall);
+  const roof = new THREE.Mesh(new THREE.CylinderGeometry(0.001, Math.max(w, d) * 0.78, wallH * 0.55, 4), roofMaterial);
+  roof.position.y = y + wallH + wallH * 0.27;
+  roof.rotation.y = Math.PI / 4;
+  roof.scale.set(w / Math.max(w, d), 1, d / Math.max(w, d));
+  roof.castShadow = true;
+  group.add(roof);
+  group.position.set(x, 0, z);
+  group.rotation.y = rotation;
+  scene.add(group);
+  return group;
+}
+
+function createLandmarks() {
+  const stone = materials.landmark;
+  const glass = materials.glass;
+
+  // --- Tháp Rùa: tiny islet + the Turtle Tower, alone in Hồ Gươm ---
+  {
+    const tp = project(LANDMARKS.thapRua.lat, LANDMARKS.thapRua.lng);
+    const islet = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.3, 0.1, 12), materials.park);
+    islet.position.set(tp.x, 0.0, tp.z);
+    scene.add(islet);
+    let ty = 0.05;
+    const tiers = [
+      { w: 0.16, h: 0.11, d: 0.2 },
+      { w: 0.125, h: 0.1, d: 0.16 },
+      { w: 0.09, h: 0.09, d: 0.12 },
+    ];
+    tiers.forEach((tier) => {
+      const box = new THREE.Mesh(new THREE.BoxGeometry(tier.w, tier.h, tier.d), brickAncient);
+      box.position.set(tp.x, ty + tier.h / 2, tp.z);
+      box.castShadow = true;
+      scene.add(box);
+      ty += tier.h + 0.012;
+    });
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.001, 0.075, 0.06, 4), templeRed);
+    cap.position.set(tp.x, ty + 0.03, tp.z);
+    cap.rotation.y = Math.PI / 4;
+    scene.add(cap);
+  }
+
+  // --- Đền Ngọc Sơn + cầu Thê Húc: island temple and the scarlet bridge ---
+  {
+    const np = project(LANDMARKS.ngocSon.lat, LANDMARKS.ngocSon.lng);
+    const islet = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.36, 0.1, 12), materials.park);
+    islet.position.set(np.x, 0.0, np.z);
+    scene.add(islet);
+    addTempleBlock(np.x, np.z, 0.26, 0.2, 0.14, materials.landmark, templeRed, 0.2, 0.05);
+    // Thê Húc: an arched crimson footbridge back to the shore.
+    const sp = project(LANDMARKS.theHucShore.lat, LANDMARKS.theHucShore.lng, 0.06);
+    const mid = new THREE.Vector3((np.x + sp.x) / 2, 0.24, (np.z + sp.z) / 2);
+    makeCurveTube([new THREE.Vector3(np.x, 0.08, np.z), mid, sp], 0.028, templeRedBright, 24);
+  }
+
+  // --- Nhà hát Lớn: colonial opera house with a copper dome ---
+  {
+    createBlockAt(LANDMARKS.operaHouse.lat, LANDMARKS.operaHouse.lng, 0.5, 0.36, 0.3, stone, 0.14);
+    const op = project(LANDMARKS.operaHouse.lat, LANDMARKS.operaHouse.lng);
+    const portico = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.24, 0.1), lacquerYellow);
+    portico.position.set(op.x, 0.12, op.z + 0.2);
+    portico.rotation.y = 0.14;
+    portico.castShadow = true;
+    scene.add(portico);
+    const dome = new THREE.Mesh(new THREE.SphereGeometry(0.15, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2), materials.copper);
+    dome.scale.set(1.5, 0.85, 1);
+    dome.position.set(op.x, 0.3, op.z - 0.04);
+    dome.rotation.y = 0.14;
+    dome.castShadow = true;
+    scene.add(dome);
+  }
+
+  // --- Nhà thờ Lớn: neo-Gothic cathedral, twin dark towers ---
+  {
+    const cp = project(LANDMARKS.stJoseph.lat, LANDMARKS.stJoseph.lng);
+    const nave = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.26, 0.4), graniteDark);
+    nave.position.set(cp.x, 0.13, cp.z);
+    nave.rotation.y = 0.1;
+    nave.castShadow = true;
+    scene.add(nave);
+    for (const off of [-0.09, 0.09]) {
+      const anchor = new THREE.Vector3(off, 0, 0.17).applyAxisAngle(UP, 0.1);
+      const tower = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.5, 0.09), graniteDark);
+      tower.position.set(cp.x + anchor.x, 0.25, cp.z + anchor.z);
+      tower.castShadow = true;
+      scene.add(tower);
+      const spire = new THREE.Mesh(new THREE.CylinderGeometry(0.001, 0.055, 0.1, 4), graniteDark);
+      spire.position.set(cp.x + anchor.x, 0.55, cp.z + anchor.z);
+      scene.add(spire);
+    }
+  }
+
+  // --- Cột cờ Hà Nội: three-tier base + octagonal flag tower ---
+  {
+    const fp = project(LANDMARKS.flagTower.lat, LANDMARKS.flagTower.lng);
+    let fy = 0;
+    for (const [w, h] of [
+      [0.42, 0.08],
+      [0.32, 0.08],
+      [0.22, 0.1],
+    ]) {
+      const tier = new THREE.Mesh(new THREE.BoxGeometry(w, h, w), brickAncient);
+      tier.position.set(fp.x, fy + h / 2, fp.z);
+      tier.castShadow = true;
+      scene.add(tier);
+      fy += h;
+    }
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.065, 0.42, 8), brickAncient);
+    shaft.position.set(fp.x, fy + 0.21, fp.z);
+    shaft.castShadow = true;
+    scene.add(shaft);
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 0.2, 5), materials.rail);
+    pole.position.set(fp.x, fy + 0.42 + 0.1, fp.z);
+    scene.add(pole);
+    const flag = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.14, 0.09),
+      new THREE.MeshStandardMaterial({ color: 0xd21f24, side: THREE.DoubleSide, emissive: new THREE.Color(0x3a0000) }),
+    );
+    flag.position.set(fp.x + 0.08, fy + 0.48, fp.z);
+    scene.add(flag);
+  }
+
+  // --- Lăng Chủ tịch Hồ Chí Minh: stepped granite mausoleum + colonnade ---
+  {
+    const mp = project(LANDMARKS.mausoleum.lat, LANDMARKS.mausoleum.lng);
+    const plinth = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.1, 0.52), graniteDark);
+    plinth.position.set(mp.x, 0.05, mp.z);
+    plinth.receiveShadow = true;
+    scene.add(plinth);
+    const hall = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.2, 0.36), graniteDark);
+    hall.position.set(mp.x, 0.2, mp.z);
+    hall.castShadow = true;
+    scene.add(hall);
+    // Colonnade: a lighter band of columns around the hall.
+    const band = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.14, 0.42), stone);
+    band.position.set(mp.x, 0.37, mp.z);
+    band.castShadow = true;
+    scene.add(band);
+    const roof = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.06, 0.46), graniteDark);
+    roof.position.set(mp.x, 0.47, mp.z);
+    roof.castShadow = true;
+    scene.add(roof);
+  }
+
+  // --- Chùa Một Cột: the lotus pagoda on its single pillar ---
+  {
+    const op = project(LANDMARKS.onePillar.lat, LANDMARKS.onePillar.lng);
+    const pond = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.02, 0.22), materials.pond);
+    pond.position.set(op.x, 0.03, op.z);
+    scene.add(pond);
+    const pillar = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.025, 0.12, 8), brickAncient);
+    pillar.position.set(op.x, 0.1, op.z);
+    scene.add(pillar);
+    addTempleBlock(op.x, op.z, 0.1, 0.1, 0.06, templeRed, templeRed, 0, 0.16);
+  }
+
+  // --- Hoàng thành Thăng Long: Đoan Môn gate + Kính Thiên platform ---
+  {
+    const hp = project(LANDMARKS.citadel.lat, LANDMARKS.citadel.lng);
+    // Đoan Môn: long wall with a central watch pavilion.
+    const gate = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.14, 0.12), brickAncient);
+    gate.position.set(hp.x, 0.07, hp.z + 0.16);
+    gate.castShadow = true;
+    scene.add(gate);
+    addTempleBlock(hp.x, hp.z + 0.16, 0.16, 0.1, 0.09, lacquerYellow, templeRed, 0, 0.14);
+    // Kính Thiên: raised platform behind.
+    const platform = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.08, 0.2), stone);
+    platform.position.set(hp.x, 0.04, hp.z - 0.12);
+    scene.add(platform);
+    addTempleBlock(hp.x, hp.z - 0.12, 0.22, 0.14, 0.1, lacquerYellow, templeRed, 0, 0.08);
+  }
+
+  // --- Nhà Quốc hội: glass cube with the round debating chamber ---
+  {
+    const pp = project(LANDMARKS.parliament.lat, LANDMARKS.parliament.lng);
+    const cube = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.24, 0.34), glass);
+    cube.position.set(pp.x, 0.12, pp.z);
+    cube.castShadow = true;
+    scene.add(cube);
+    const drum = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.28, 18), stone);
+    drum.position.set(pp.x, 0.14, pp.z);
+    scene.add(drum);
+  }
+
+  // --- Văn Miếu: walled compound + Khuê Văn Các pavilion ---
+  {
+    const vp = project(LANDMARKS.vanMieu.lat, LANDMARKS.vanMieu.lng);
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.05, 0.44), brickAncient);
+    wall.position.set(vp.x, 0.055, vp.z);
+    wall.receiveShadow = true;
+    scene.add(wall);
+    // Khuê Văn Các: two-storey pavilion on four brick pillars.
+    const kv = { x: vp.x, z: vp.z + 0.1 };
+    for (const [dx, dz] of [
+      [-0.03, -0.03],
+      [0.03, -0.03],
+      [-0.03, 0.03],
+      [0.03, 0.03],
+    ]) {
+      const pillar = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.08, 6), brickAncient);
+      pillar.position.set(kv.x + dx, 0.12, kv.z + dz);
+      scene.add(pillar);
+    }
+    addTempleBlock(kv.x, kv.z, 0.09, 0.09, 0.06, templeRed, templeRed, 0, 0.16);
+    // Main sanctuary at the compound's north end.
+    addTempleBlock(vp.x, vp.z - 0.14, 0.2, 0.1, 0.08, lacquerYellow, templeRed, 0, 0.08);
+  }
+
+  // --- Chùa Trấn Quốc: the red 11-tier stupa on its West Lake islet ---
+  {
+    const tq = project(LANDMARKS.tranQuoc.lat, LANDMARKS.tranQuoc.lng);
+    const islet = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.28, 0.12, 12), materials.park);
+    islet.position.set(tq.x, 0.0, tq.z);
+    scene.add(islet);
+    let sy = 0.06;
+    for (let i = 0; i < 8; i += 1) {
+      const r = 0.085 - i * 0.009;
+      const tier = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.86, r, 0.075, 8), templeRedBright);
+      tier.position.set(tq.x, sy + 0.037, tq.z);
+      tier.castShadow = true;
+      scene.add(tier);
+      sy += 0.082;
+    }
+    const lotus = new THREE.Mesh(new THREE.ConeGeometry(0.03, 0.08, 8), lacquerYellow);
+    lotus.position.set(tq.x, sy + 0.04, tq.z);
+    scene.add(lotus);
+    addTempleBlock(tq.x + 0.14, tq.z + 0.05, 0.12, 0.09, 0.07, lacquerYellow, templeRed, -0.5, 0.06);
+  }
+
+  // --- Phủ Tây Hồ on the Quảng An peninsula ---
+  {
+    const pt = project(LANDMARKS.phuTayHo.lat, LANDMARKS.phuTayHo.lng);
+    addTempleBlock(pt.x, pt.z, 0.18, 0.12, 0.09, lacquerYellow, templeRed, -0.55, 0.02);
+    addTempleBlock(pt.x + 0.1, pt.z + 0.08, 0.1, 0.08, 0.07, templeRed, templeRed, -0.55, 0.02);
+  }
+
+  // --- Chợ Đồng Xuân: triple-vaulted market hall ---
+  {
+    const dx = project(LANDMARKS.dongXuan.lat, LANDMARKS.dongXuan.lng);
+    const hall = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.14, 0.3), stone);
+    hall.position.set(dx.x, 0.07, dx.z);
+    hall.rotation.y = 0.1;
+    hall.castShadow = true;
+    scene.add(hall);
+    for (const off of [-0.11, 0, 0.11]) {
+      const vault = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.055, 0.3, 10, 1, false, 0, Math.PI), stone);
+      const anchor = new THREE.Vector3(off, 0, 0).applyAxisAngle(UP, 0.1);
+      vault.position.set(dx.x + anchor.x, 0.14, dx.z + anchor.z);
+      vault.rotation.z = Math.PI / 2;
+      vault.rotation.y = 0.1;
+      vault.castShadow = true;
+      scene.add(vault);
+    }
+  }
+
+  // --- Ô Quan Chưởng: the last old city gate ---
+  {
+    const oq = project(LANDMARKS.oQuanChuong.lat, LANDMARKS.oQuanChuong.lng);
+    const gate = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.1, 0.08), brickAncient);
+    gate.position.set(oq.x, 0.05, oq.z);
+    gate.castShadow = true;
+    scene.add(gate);
+    addTempleBlock(oq.x, oq.z, 0.08, 0.06, 0.05, brickAncient, templeRed, 0, 0.1);
+  }
+
+  // --- Ga Hà Nội: the old station hall ---
+  createBlockAt(LANDMARKS.gaHaNoi.lat, LANDMARKS.gaHaNoi.lng, 0.34, 0.16, 0.22, lacquerYellow, 0.14);
+
+  // --- Hỏa Lò: low dark walls ---
+  createBlockAt(LANDMARKS.hoaLo.lat, LANDMARKS.hoaLo.lng, 0.22, 0.18, 0.12, brickAncient, 0.14);
+
+  // --- Keangnam Landmark 72 + its two residential towers ---
+  {
+    const kp = project(LANDMARKS.keangnam.lat, LANDMARKS.keangnam.lng);
+    const main = new THREE.Mesh(new THREE.BoxGeometry(0.62, 3.6, 0.5), towerGlass);
+    main.position.set(kp.x, 1.8, kp.z);
+    main.rotation.y = 0.05;
+    main.castShadow = true;
+    scene.add(main);
+    for (const [dx, dz] of [
+      [0.55, 0.35],
+      [-0.5, 0.42],
+    ]) {
+      const tower = new THREE.Mesh(new THREE.BoxGeometry(0.34, 1.9, 0.3), materials.building);
+      tower.position.set(kp.x + dx, 0.95, kp.z + dz);
+      tower.rotation.y = 0.05;
+      tower.castShadow = true;
+      scene.add(tower);
+    }
+  }
+
+  // --- Lotte Center: tapered slab with the sliced notch ---
+  {
+    const lp = project(LANDMARKS.lotte.lat, LANDMARKS.lotte.lng);
+    const slab = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.42, 2.9, 4), towerGlass);
+    slab.position.set(lp.x, 1.45, lp.z);
+    slab.rotation.y = Math.PI / 4 + 0.08;
+    slab.scale.set(1.25, 1, 0.72);
+    slab.castShadow = true;
+    scene.add(slab);
+  }
+
+  // --- Vinhomes Metropolis: three matching towers ---
+  {
+    const vp = project(LANDMARKS.metropolis.lat, LANDMARKS.metropolis.lng);
+    for (const [dx, dz] of [
+      [-0.3, 0.1],
+      [0.05, -0.12],
+      [0.4, 0.08],
+    ]) {
+      const tower = new THREE.Mesh(new THREE.BoxGeometry(0.26, 1.7, 0.22), towerGlass);
+      tower.position.set(vp.x + dx, 0.85, vp.z + dz);
+      tower.rotation.y = -0.08;
+      tower.castShadow = true;
+      scene.add(tower);
+    }
+  }
+
+  // --- Vinhomes Times City: a phalanx of cream towers on a podium ---
+  {
+    const tp = project(LANDMARKS.timesCity.lat, LANDMARKS.timesCity.lng);
+    const podium = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.14, 1.2), stone);
+    podium.position.set(tp.x, 0.07, tp.z);
+    podium.receiveShadow = true;
+    scene.add(podium);
+    const rand = seededRandom(52);
+    for (let gx = 0; gx < 4; gx += 1) {
+      for (let gz = 0; gz < 3; gz += 1) {
+        const h = 1.15 + rand() * 0.3;
+        const tower = new THREE.Mesh(new THREE.BoxGeometry(0.2, h, 0.18), materials.building);
+        tower.position.set(tp.x - 0.6 + gx * 0.4, h / 2 + 0.14, tp.z - 0.4 + gz * 0.4);
+        tower.rotation.y = 0.1;
+        tower.castShadow = true;
+        scene.add(tower);
+      }
+    }
+  }
+
+  // --- Vinhomes Royal City: European-style crescent of towers ---
+  {
+    const rp = project(LANDMARKS.royalCity.lat, LANDMARKS.royalCity.lng);
+    const podium = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.12, 0.9), stone);
+    podium.position.set(rp.x, 0.06, rp.z);
+    podium.receiveShadow = true;
+    scene.add(podium);
+    for (let i = 0; i < 5; i += 1) {
+      const angle = -0.5 + i * 0.25;
+      const tower = new THREE.Mesh(new THREE.BoxGeometry(0.22, 1.35, 0.2), materials.building);
+      tower.position.set(rp.x - 0.55 + i * 0.28, 0.79, rp.z + Math.sin(angle) * 0.22);
+      tower.rotation.y = angle * 0.4;
+      tower.castShadow = true;
+      scene.add(tower);
+    }
+  }
+
+  // --- SVĐ Mỹ Đình: elliptical bowl with two white roof crescents ---
+  {
+    const sp = project(LANDMARKS.myDinhStadium.lat, LANDMARKS.myDinhStadium.lng);
+    const bowl = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.58, 0.16, 24), stone);
+    bowl.scale.set(1.3, 1, 0.9);
+    bowl.position.set(sp.x, 0.08, sp.z);
+    bowl.castShadow = true;
+    scene.add(bowl);
+    const pitch = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 0.17, 24), materials.park);
+    pitch.scale.set(1.25, 1, 0.85);
+    pitch.position.set(sp.x, 0.085, sp.z);
+    scene.add(pitch);
+    for (const side of [-0.42, 0.42]) {
+      const roof = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.035, 8, 20, Math.PI * 0.8), materials.ferry);
+      roof.position.set(sp.x, 0.3, sp.z + side);
+      roof.rotation.x = side > 0 ? -0.5 : 0.5 + Math.PI;
+      roof.castShadow = true;
+      scene.add(roof);
+    }
+  }
+
+  // --- Bảo tàng Hà Nội: the inverted pyramid ---
+  {
+    const bp = project(LANDMARKS.hanoiMuseum.lat, LANDMARKS.hanoiMuseum.lng);
+    let by = 0.08;
+    for (let i = 0; i < 4; i += 1) {
+      const w = 0.16 + i * 0.09;
+      const layer = new THREE.Mesh(new THREE.BoxGeometry(w, 0.09, w), i === 3 ? glass : stone);
+      layer.position.set(bp.x, by + 0.045, bp.z);
+      layer.rotation.y = 0.2;
+      layer.castShadow = true;
+      scene.add(layer);
+      by += 0.09;
+    }
+  }
+
+  // --- Hotels & malls with recognizable massing ---
+  createBlockAt(LANDMARKS.westLakeIntercon.lat, LANDMARKS.westLakeIntercon.lng, 0.3, 0.14, 0.2, stone, -0.5);
+  createBlockAt(LANDMARKS.aeonLongBien.lat, LANDMARKS.aeonLongBien.lng, 0.6, 0.4, 0.18, materials.ghost, 0.1);
+  createBlockAt(LANDMARKS.lotteMallTayHo.lat, LANDMARKS.lotteMallTayHo.lng, 0.44, 0.34, 0.22, stone, -0.2);
+  addLandmarkLabel("Hồ Tây", 21.0575, 105.818, 0.8);
+  addLandmarkLabel("Bãi giữa", 21.0405, 105.8665, 0.7);
+  addLandmarkLabel("Cầu Nhật Tân", 21.0845, 105.832, 2.4);
+  addLandmarkLabel("Sông Hồng", 21.02, 105.869, 0.6);
+}
+
+function createMarker(item) {
+  const color = stageColor(item.stage);
+  const material = new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.36,
+    emissive: color.clone().multiplyScalar(0.12),
+  });
+  const p = project(item.lat, item.lng);
+  const group = new THREE.Group();
+  group.position.set(p.x, 0.18, p.z);
+  group.userData.item = item;
+
+  const pin = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.065, 1.05, 10), material);
+  pin.position.y = 0.52;
+  pin.castShadow = true;
+  pin.userData.item = item;
+  group.add(pin);
+
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 18, 12), material);
+  head.position.y = 1.12;
+  head.castShadow = true;
+  head.userData.item = item;
+  group.add(head);
+
+  const halo = new THREE.Mesh(
+    new THREE.RingGeometry(0.34, 0.44, 24),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.34, side: THREE.DoubleSide }),
+  );
+  halo.rotation.x = -Math.PI / 2;
+  halo.position.y = 0.08;
+  halo.userData.item = item;
+  group.add(halo);
+
+  const hitArea = new THREE.Mesh(
+    new THREE.SphereGeometry(0.48, 12, 8),
+    new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }),
+  );
+  hitArea.position.y = 1.05;
+  hitArea.userData.item = item;
+  hitArea.userData.hitArea = true;
+  group.add(hitArea);
+
+  scene.add(group);
+  markerMeshes.push(pin, head, halo, hitArea);
+  startupMarkers.set(item.id, { group, item, halo });
+}
+
+function createContextMarker(item) {
+  const color =
+    item.category === "Khách sạn"
+      ? 0xe8b500
+      : item.category === "Đại học"
+        ? 0xd74a3d
+        : item.category === "Chợ & TTTM"
+          ? 0x71c97f
+          : 0xb9c7cf;
+  const material = new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.48,
+    emissive: new THREE.Color(color).multiplyScalar(0.06),
+  });
+  const p = project(item.lat, item.lng);
+  const geometry = item.category === "Khách sạn" ? new THREE.OctahedronGeometry(0.56) : new THREE.BoxGeometry(0.82, 0.82, 0.82);
+  const marker = new THREE.Mesh(geometry, material);
+  marker.position.set(p.x, 0.72, p.z);
+  marker.castShadow = true;
+  marker.userData.context = item;
+  scene.add(marker);
+}
+
+function createMarkers() {
+  STARTUPS.forEach(createMarker);
+  CONTEXT_POINTS.forEach(createContextMarker);
+}
+
+/* ---------------------------------------------------------------- */
+/* Cinematic selection: spotlight beam, pulse rings, focus easing    */
+/* ---------------------------------------------------------------- */
+
+const FOG_BASE = scene.fog.density;
+const FOG_FOCUS = FOG_BASE * 1.38;
+const FOV_BASE = camera.fov;
+const FOV_FOCUS = FOV_BASE - 3;
+const FOCUS_COLOR = 0x3a6bff;
+let fogTarget = FOG_BASE;
+let fovTarget = FOV_BASE;
+let focusFx = null;
+
+function makeBeamTexture() {
+  const c = document.createElement("canvas");
+  c.width = 4;
+  c.height = 128;
+  const ctx = c.getContext("2d");
+  const grad = ctx.createLinearGradient(0, 128, 0, 0);
+  grad.addColorStop(0, "rgba(255,255,255,0.85)");
+  grad.addColorStop(0.55, "rgba(255,255,255,0.26)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 4, 128);
+  return new THREE.CanvasTexture(c);
+}
+
+function ensureFocusFx() {
+  if (focusFx) return focusFx;
+  const group = new THREE.Group();
+  group.visible = false;
+
+  const beam = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.55, 0.4, 7.5, 20, 1, true),
+    new THREE.MeshBasicMaterial({
+      color: FOCUS_COLOR,
+      map: makeBeamTexture(),
+      transparent: true,
+      opacity: 0.5,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    }),
+  );
+  beam.position.y = 3.75;
+  group.add(beam);
+
+  // Two expanding ground rings, half a cycle apart, for a continuous pulse.
+  const rings = [0, 1].map((i) => {
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.5, 0.6, 40),
+      new THREE.MeshBasicMaterial({
+        color: FOCUS_COLOR,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      }),
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.06;
+    ring.userData.phase = i * 0.5;
+    group.add(ring);
+    return ring;
+  });
+
+  scene.add(group);
+  focusFx = { group, beam, rings };
+  return focusFx;
+}
+
+function engageFocus(startup) {
+  const fx = ensureFocusFx();
+  const p = project(startup.lat, startup.lng);
+  fx.group.position.set(p.x, 0.05, p.z);
+  fx.group.visible = true;
+  fogTarget = FOG_FOCUS;
+  fovTarget = FOV_FOCUS;
+}
+
+function releaseFocus() {
+  if (focusFx) focusFx.group.visible = false;
+  fogTarget = FOG_BASE;
+  fovTarget = FOV_BASE;
+}
+
+function updateFocusFx(elapsed, delta) {
+  // Ease fog density and FOV toward their targets for a soft push-in.
+  scene.fog.density += (fogTarget - scene.fog.density) * Math.min(1, delta * 2.6);
+  const fovStep = (fovTarget - camera.fov) * Math.min(1, delta * 3);
+  if (Math.abs(fovStep) > 0.0004) {
+    camera.fov += fovStep;
+    camera.updateProjectionMatrix();
+  }
+
+  if (!focusFx || !focusFx.group.visible) return;
+  focusFx.beam.material.opacity = 0.42 + Math.sin(elapsed * 2.1) * 0.1;
+  focusFx.beam.rotation.y = elapsed * 0.4;
+  focusFx.rings.forEach((ring) => {
+    const t = (elapsed * 0.62 + ring.userData.phase) % 1;
+    const scale = 1 + t * 2.3;
+    ring.scale.setScalar(scale);
+    ring.material.opacity = 0.5 * (1 - t) * (1 - t);
+  });
+}
+
+function createCarMesh(color) {
+  const group = new THREE.Group();
+  const bodyMaterial = new THREE.MeshStandardMaterial({ color, roughness: 0.42, metalness: 0.02 });
+  const glassMaterial = new THREE.MeshStandardMaterial({
+    color: 0x9ec6d4,
+    roughness: 0.18,
+    metalness: 0.04,
+    transparent: true,
+    opacity: 0.88,
+  });
+  const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x171a1f, roughness: 0.72 });
+  const lightMaterial = new THREE.MeshStandardMaterial({
+    color: 0xfff4c8,
+    emissive: new THREE.Color(0xffd56f).multiplyScalar(0.45),
+    roughness: 0.3,
+  });
+  const tailMaterial = new THREE.MeshStandardMaterial({
+    color: 0xe13c36,
+    emissive: new THREE.Color(0xe13c36).multiplyScalar(0.25),
+    roughness: 0.4,
+  });
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.18, 0.72), bodyMaterial);
+  body.position.y = 0.16;
+  body.castShadow = true;
+  group.add(body);
+
+  const hood = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.1, 0.24), bodyMaterial);
+  hood.position.set(0, 0.22, 0.24);
+  hood.castShadow = true;
+  group.add(hood);
+
+  const cabin = new THREE.Mesh(new THREE.BoxGeometry(0.31, 0.18, 0.34), glassMaterial);
+  cabin.position.set(0, 0.32, -0.05);
+  cabin.castShadow = true;
+  group.add(cabin);
+
+  const wheelGeo = new THREE.CylinderGeometry(0.08, 0.08, 0.075, 14);
+  wheelGeo.rotateZ(Math.PI / 2);
+  for (const x of [-0.26, 0.26]) {
+    for (const z of [-0.24, 0.24]) {
+      const wheel = new THREE.Mesh(wheelGeo, wheelMaterial);
+      wheel.position.set(x, 0.08, z);
+      wheel.castShadow = true;
+      group.add(wheel);
+    }
+  }
+
+  const headLightGeo = new THREE.BoxGeometry(0.08, 0.045, 0.025);
+  for (const x of [-0.12, 0.12]) {
+    const headlight = new THREE.Mesh(headLightGeo, lightMaterial);
+    headlight.position.set(x, 0.17, 0.374);
+    group.add(headlight);
+
+    const tail = new THREE.Mesh(headLightGeo, tailMaterial);
+    tail.position.set(x, 0.17, -0.374);
+    group.add(tail);
+  }
+
+  group.scale.setScalar(0.92);
+  return group;
+}
+
+// Xe máy: the soul of Hanoi traffic. A scooter body, a rider, a helmet.
+function createBikeMesh(bodyColor, helmetColor = 0xf4f1e8) {
+  const group = new THREE.Group();
+  const bodyMaterial = new THREE.MeshStandardMaterial({ color: bodyColor, roughness: 0.42, metalness: 0.08 });
+  const riderMaterial = new THREE.MeshStandardMaterial({ color: 0x2e343c, roughness: 0.7 });
+  const helmetMaterial = new THREE.MeshStandardMaterial({ color: helmetColor, roughness: 0.35 });
+  const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x171a1f, roughness: 0.72 });
+
+  const deck = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.07, 0.42), bodyMaterial);
+  deck.position.y = 0.11;
+  deck.castShadow = true;
+  group.add(deck);
+
+  const front = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.12, 0.07), bodyMaterial);
+  front.position.set(0, 0.19, 0.17);
+  group.add(front);
+
+  const rider = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.16, 0.1), riderMaterial);
+  rider.position.set(0, 0.24, -0.06);
+  rider.castShadow = true;
+  group.add(rider);
+
+  const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.055, 8, 6), helmetMaterial);
+  helmet.position.set(0, 0.35, -0.06);
+  group.add(helmet);
+
+  const wheelGeo = new THREE.CylinderGeometry(0.055, 0.055, 0.045, 10);
+  wheelGeo.rotateZ(Math.PI / 2);
+  for (const z of [-0.17, 0.19]) {
+    const wheel = new THREE.Mesh(wheelGeo, wheelMaterial);
+    wheel.position.set(0, 0.055, z);
+    group.add(wheel);
+  }
+  return group;
+}
+
+function createBusMesh() {
+  const group = new THREE.Group();
+  // Transerco cream-yellow with the red band.
+  const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0xf0dfa6, roughness: 0.5 });
+  const stripeMaterial = new THREE.MeshStandardMaterial({ color: 0xc03a2e, roughness: 0.45 });
+  const glassMaterial = new THREE.MeshStandardMaterial({ color: 0x9ec6d4, roughness: 0.2, transparent: true, opacity: 0.88 });
+  const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x171a1f, roughness: 0.72 });
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.32, 1.5), bodyMaterial);
+  body.position.y = 0.26;
+  body.castShadow = true;
+  group.add(body);
+  const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.43, 0.07, 1.5), stripeMaterial);
+  stripe.position.y = 0.18;
+  group.add(stripe);
+  const windows = new THREE.Mesh(new THREE.BoxGeometry(0.43, 0.09, 1.3), glassMaterial);
+  windows.position.y = 0.34;
+  group.add(windows);
+  const wheelGeo = new THREE.CylinderGeometry(0.08, 0.08, 0.075, 12);
+  wheelGeo.rotateZ(Math.PI / 2);
+  for (const x of [-0.22, 0.22]) {
+    for (const z of [-0.52, 0.52]) {
+      const wheel = new THREE.Mesh(wheelGeo, wheelMaterial);
+      wheel.position.set(x, 0.08, z);
+      group.add(wheel);
+    }
+  }
+  return group;
+}
+
+function createTruckMesh(color) {
+  const group = new THREE.Group();
+  const cabMaterial = new THREE.MeshStandardMaterial({ color, roughness: 0.45 });
+  const boxMaterial = new THREE.MeshStandardMaterial({ color: 0xe9e6dd, roughness: 0.6 });
+  const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x171a1f, roughness: 0.72 });
+
+  const cab = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.26, 0.34), cabMaterial);
+  cab.position.set(0, 0.21, 0.5);
+  cab.castShadow = true;
+  group.add(cab);
+  const cargo = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.4, 0.86), boxMaterial);
+  cargo.position.set(0, 0.28, -0.12);
+  cargo.castShadow = true;
+  group.add(cargo);
+  const wheelGeo = new THREE.CylinderGeometry(0.08, 0.08, 0.075, 12);
+  wheelGeo.rotateZ(Math.PI / 2);
+  for (const x of [-0.22, 0.22]) {
+    for (const z of [-0.4, 0.48]) {
+      const wheel = new THREE.Mesh(wheelGeo, wheelMaterial);
+      wheel.position.set(x, 0.08, z);
+      group.add(wheel);
+    }
+  }
+  return group;
+}
+
+function pathWorldLength(path) {
+  let length = 0;
+  for (let i = 1; i < path.length; i += 1) length += path[i].distanceTo(path[i - 1]);
+  return length;
+}
+
+function createVehicles(roadPaths) {
+  // Hanoi traffic is a river of motorbikes with cars swimming among them.
+  // Cyan = Xanh SM electric taxis; green bikes = Grab riders.
+  const carColors = [0x2fb8ac, 0xf4f1e8, 0x3c414b, 0x2fb8ac, 0xe54c42, 0x2e6cff, 0xf4f1e8, 0x30b37c, 0x2fb8ac, 0xd7b96a];
+  const bikeColors = [0x30343c, 0x00b14f, 0xc03a2e, 0x2e6cff, 0x00b14f, 0x6b7280, 0xd7b96a, 0x00b14f, 0x8c3f5d, 0x394856];
+  const helmetColors = [0xf4f1e8, 0x2e343c, 0xd21f24, 0x2e6cff, 0xf7b500];
+  const truckColors = [0x8a4b3a, 0x3c5a48, 0x39424e];
+  const random = seededRandom(700);
+  // Long boulevards get proportionally more traffic than short bridge decks.
+  let built = 0;
+  roadPaths.forEach((path) => {
+    const length = pathWorldLength(path);
+    const count = Math.max(1, Math.round(length / 11));
+    for (let i = 0; i < count && built < 132; i += 1) {
+      const kind =
+        built % 13 === 6 ? "bus" : built % 17 === 9 ? "truck" : built % 3 === 0 ? "car" : "bike";
+      const mesh =
+        kind === "bus"
+          ? createBusMesh()
+          : kind === "truck"
+            ? createTruckMesh(truckColors[built % truckColors.length])
+            : kind === "car"
+              ? createCarMesh(carColors[built % carColors.length])
+              : createBikeMesh(
+                  bikeColors[built % bikeColors.length],
+                  helmetColors[built % helmetColors.length],
+                );
+      // Vehicles are scaled to fit inside the street gaps between block plates.
+      mesh.scale.setScalar(kind === "car" ? 0.55 : kind === "bike" ? 0.62 : 0.58);
+      scene.add(mesh);
+      vehicleFleet.push({
+        mesh,
+        path,
+        t: random(),
+        // Normalize by path length so world speed is consistent everywhere.
+        // Bikes weave a touch quicker than the cars.
+        speed: ((kind === "bike" ? 0.78 : 0.6) + random() * 0.5) / Math.max(4, length),
+        lane: (random() - 0.5) * (kind === "bike" ? 0.14 : 0.08),
+      });
+      built += 1;
+    }
+  });
+}
+
+function samplePath(path, t) {
+  const wrapped = ((t % 1) + 1) % 1;
+  const scaled = wrapped * (path.length - 1);
+  const index = Math.floor(scaled);
+  const frac = scaled - index;
+  const a = path[index];
+  const b = path[Math.min(index + 1, path.length - 1)];
+  const point = new THREE.Vector3().lerpVectors(a, b, frac);
+  const tangent = new THREE.Vector3().subVectors(b, a).normalize();
+  const normal = new THREE.Vector3(-tangent.z, 0, tangent.x);
+  return { point, tangent, normal };
+}
+
+function updateVehicles(delta) {
+  vehicleFleet.forEach((vehicle) => {
+    vehicle.t += delta * vehicle.speed;
+    const { point, tangent, normal } = samplePath(vehicle.path, vehicle.t);
+    vehicle.mesh.position.copy(point).addScaledVector(normal, vehicle.lane);
+    vehicle.mesh.position.y = point.y + 0.02; // wheels on the asphalt (or the bridge deck)
+    vehicle.mesh.rotation.y = Math.atan2(tangent.x, tangent.z);
+  });
+}
+
+function updateTransit(delta) {
+  subwayFleet.forEach((vehicle) => {
+    vehicle.t += delta * vehicle.speed;
+    const { point, tangent } = samplePath(vehicle.path, vehicle.t);
+    vehicle.mesh.position.copy(point);
+    vehicle.mesh.position.y = point.y + 0.09;
+    vehicle.mesh.rotation.y = Math.atan2(tangent.x, tangent.z);
+  });
+
+  ferryFleet.forEach((vehicle) => {
+    vehicle.t += delta * vehicle.speed;
+    const { point, tangent } = samplePath(vehicle.path, vehicle.t);
+    vehicle.mesh.position.copy(point);
+    vehicle.mesh.position.y = 0.16;
+    vehicle.mesh.rotation.y = Math.atan2(tangent.x, tangent.z);
+  });
+
+  planeFleet.forEach((vehicle) => {
+    vehicle.t += delta * vehicle.speed;
+    const { point, tangent } = samplePath(vehicle.path, vehicle.t);
+    vehicle.mesh.position.copy(point);
+    vehicle.mesh.rotation.y = Math.atan2(tangent.x, tangent.z);
+    vehicle.mesh.rotation.z = Math.sin(vehicle.t * Math.PI * 2) * 0.08;
+  });
+}
+
+// A dozen gulls circling the parks and the harbor: one instanced chevron
+// mesh, one draw call, a handful of matrix updates per frame.
+function createBirds() {
+  const wing = new Float32Array([
+    // left wing
+    0, 0, 0.16, -0.5, 0.12, -0.12, -0.05, 0, -0.06,
+    // right wing
+    0, 0, 0.16, 0.05, 0, -0.06, 0.5, 0.12, -0.12,
+  ]);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(wing, 3));
+  const material = new THREE.MeshBasicMaterial({ color: 0x2b3038, side: THREE.DoubleSide });
+
+  const flocks = [
+    { lat: 21.058, lng: 105.82, alt: 6.4, radius: 4.8, count: 5 }, // Hồ Tây
+    { lat: 21.047, lng: 105.861, alt: 5.4, radius: 3.4, count: 4 }, // bãi giữa sông Hồng
+    { lat: 21.0287, lng: 105.8523, alt: 5.0, radius: 2.4, count: 3 }, // Hồ Gươm
+  ];
+  const random = seededRandom(77);
+  flocks.forEach((flock) => {
+    const center = project(flock.lat, flock.lng, flock.alt);
+    for (let i = 0; i < flock.count; i += 1) {
+      birdFleet.push({
+        center,
+        radius: flock.radius * (0.72 + random() * 0.5),
+        alt: flock.alt + (random() - 0.5) * 1.6,
+        speed: (0.24 + random() * 0.2) * (random() < 0.5 ? 1 : -1),
+        phase: random() * Math.PI * 2,
+        flapHz: 5 + random() * 2.5,
+        size: 0.44 + random() * 0.22,
+      });
+    }
+  });
+
+  birdMesh = new THREE.InstancedMesh(geo, material, birdFleet.length);
+  birdMesh.frustumCulled = false;
+  scene.add(birdMesh);
+}
+
+const birdMatrix = new THREE.Matrix4();
+const birdQuat = new THREE.Quaternion();
+const birdEuler = new THREE.Euler();
+const birdPos = new THREE.Vector3();
+const birdScale = new THREE.Vector3();
+
+function updateBirds(elapsed) {
+  if (!birdMesh) return;
+  birdFleet.forEach((bird, i) => {
+    const dir = Math.sign(bird.speed);
+    const theta = bird.phase + elapsed * Math.abs(bird.speed) * dir;
+    birdPos.set(
+      bird.center.x + Math.cos(theta) * bird.radius,
+      bird.alt + Math.sin(elapsed * 1.1 + bird.phase) * 0.5,
+      bird.center.z + Math.sin(theta) * bird.radius,
+    );
+    // Face along the circle's tangent, banked gently into the turn.
+    const heading = Math.atan2(-Math.sin(theta) * dir, Math.cos(theta) * dir) + Math.PI / 2;
+    birdEuler.set(0, heading, 0.3 * dir, "YXZ");
+    birdQuat.setFromEuler(birdEuler);
+    // Wing flap: squash/stretch the chevron height.
+    const flap = 0.25 + Math.abs(Math.sin(elapsed * bird.flapHz + bird.phase)) * 1.35;
+    birdScale.set(bird.size, bird.size * flap, bird.size);
+    birdMatrix.compose(birdPos, birdQuat, birdScale);
+    birdMesh.setMatrixAt(i, birdMatrix);
+  });
+  birdMesh.instanceMatrix.needsUpdate = true;
+}
+
+function createClouds() {
+  const material = new THREE.MeshStandardMaterial({
+    color: 0xf4f1e8,
+    roughness: 0.92,
+    transparent: true,
+    opacity: 0.72,
+  });
+  const random = seededRandom(12);
+  for (let i = 0; i < 8; i += 1) {
+    const group = new THREE.Group();
+    const parts = 3 + Math.floor(random() * 4);
+    for (let j = 0; j < parts; j += 1) {
+      const puff = new THREE.Mesh(new THREE.SphereGeometry(1.2 + random() * 1.5, 12, 8), material);
+      puff.scale.y = 0.38;
+      puff.position.set((random() - 0.5) * 5, (random() - 0.5) * 0.6, (random() - 0.5) * 2);
+      group.add(puff);
+    }
+    group.position.set(-62 + random() * 130, 26 + random() * 12, -70 + random() * 55);
+    group.userData.speed = 0.45 + random() * 0.5;
+    scene.add(group);
+  }
+}
+
+function updateClouds(delta) {
+  scene.children.forEach((child) => {
+    if (!child.userData.speed) return;
+    child.position.x += delta * child.userData.speed;
+    if (child.position.x > 78) child.position.x = -78;
+  });
+}
+
+// Soft-edged translucent pads hovering low over the out-of-focus areas
+// (Long Biên, Gia Lâm, and the far fringes): a cheap stand-in for
+// depth-of-field blur that keeps central Hanoi crisp while the map's edges
+// dissolve into atmosphere. Pins out there still poke above the haze.
+function makeHazeTexture() {
+  const c = document.createElement("canvas");
+  c.width = 256;
+  c.height = 256;
+  const ctx = c.getContext("2d");
+  const g = ctx.createRadialGradient(128, 128, 24, 128, 128, 128);
+  g.addColorStop(0, "rgba(226, 236, 243, 0.8)");
+  g.addColorStop(0.65, "rgba(226, 236, 243, 0.45)");
+  g.addColorStop(1, "rgba(226, 236, 243, 0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 256, 256);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function createHaze() {
+  const tex = makeHazeTexture();
+  const pads = [
+    { lat: 21.052, lng: 105.888, w: 40, d: 42 }, // Long Biên
+    { lat: 21.0, lng: 105.888, w: 34, d: 26 }, // Gia Lâm nam
+    { lat: 20.992, lng: 105.802, w: 44, d: 22 }, // vành đai nam
+    { lat: 21.028, lng: 105.759, w: 24, d: 40 }, // rìa tây Mỹ Đình
+  ];
+  pads.forEach((pad, index) => {
+    const material = new THREE.MeshBasicMaterial({
+      map: tex,
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+    });
+    const plane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+    plane.rotation.x = -Math.PI / 2;
+    const p = project(pad.lat, pad.lng, 0.85 + index * 0.02);
+    plane.position.copy(p);
+    plane.scale.set(pad.w, pad.d, 1);
+    plane.renderOrder = 4;
+    scene.add(plane);
+  });
+}
+
+// Tiny walkers looping the sidewalk edges of the Manhattan blocks: one
+// instanced mesh, a couple hundred matrix updates per frame.
+function rectPerimeterPoint(t, hx, hz, out) {
+  const perimeter = 4 * (hx + hz);
+  let d = (((t % 1) + 1) % 1) * perimeter;
+  if (d < 2 * hx) return out.set(-hx + d, 0, -hz);
+  d -= 2 * hx;
+  if (d < 2 * hz) return out.set(hx, 0, -hz + d);
+  d -= 2 * hz;
+  if (d < 2 * hx) return out.set(hx - d, 0, hz);
+  d -= 2 * hx;
+  return out.set(-hx, 0, hz - d);
+}
+
+const PED_PALETTE = [0x30343c, 0x6b7280, 0x9a4a3f, 0x3b5f8a, 0x7d6a4f, 0xb8b2a4, 0x51606b, 0x8c3f5d].map(
+  (c) => new THREE.Color(c),
+);
+
+function createPedestrians() {
+  if (!sidewalkPlates.length) return;
+  const random = seededRandom(515);
+  const { uLen, vLen, rot } = GRID_METRICS;
+  pedRect = {
+    hx: (vLen - 0.26) / 2 + 0.06, // just outside the plate edge: the curb line
+    hz: (uLen - 0.12) / 2 + 0.05,
+    cos: Math.cos(rot),
+    sin: Math.sin(rot),
+  };
+  const total = Math.min(240, sidewalkPlates.length * 3);
+  for (let i = 0; i < total; i += 1) {
+    const plate = sidewalkPlates[Math.floor(random() * sidewalkPlates.length)];
+    pedFleet.push({
+      cx: plate.x,
+      cz: plate.z,
+      t: random(),
+      speed: (0.008 + random() * 0.009) * (random() < 0.5 ? 1 : -1),
+      phase: random() * Math.PI * 2,
+      size: 0.8 + random() * 0.45,
+    });
+  }
+  const geo = new THREE.BoxGeometry(0.05, 0.15, 0.05);
+  geo.translate(0, 0.075, 0); // feet at the origin
+  pedMesh = new THREE.InstancedMesh(
+    geo,
+    new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9 }),
+    pedFleet.length,
+  );
+  pedFleet.forEach((_, i) => pedMesh.setColorAt(i, PED_PALETTE[i % PED_PALETTE.length]));
+  scene.add(pedMesh);
+}
+
+const pedMatrix = new THREE.Matrix4();
+const pedLocal = new THREE.Vector3();
+const pedPos = new THREE.Vector3();
+const pedScale = new THREE.Vector3();
+const pedQuat = new THREE.Quaternion();
+
+function updatePedestrians(delta, elapsed) {
+  if (!pedMesh) return;
+  pedFleet.forEach((ped, i) => {
+    ped.t += delta * ped.speed;
+    rectPerimeterPoint(ped.t, pedRect.hx, pedRect.hz, pedLocal);
+    pedPos.set(
+      ped.cx + pedLocal.x * pedRect.cos + pedLocal.z * pedRect.sin,
+      0.032,
+      ped.cz - pedLocal.x * pedRect.sin + pedLocal.z * pedRect.cos,
+    );
+    // A whisper of bounce sells the walk without skeletal anything.
+    const bob = 1 + Math.sin(elapsed * 9 + ped.phase) * 0.06;
+    pedScale.set(ped.size, ped.size * bob, ped.size);
+    pedMatrix.compose(pedPos, pedQuat, pedScale);
+    pedMesh.setMatrixAt(i, pedMatrix);
+  });
+  pedMesh.instanceMatrix.needsUpdate = true;
+}
+
+function updateWater(elapsed) {
+  for (const water of waterSurfaces) {
+    const geo = water.geometry;
+    const pos = geo.attributes.position;
+    const base = water.userData.baseZ;
+    if (!base) continue;
+    for (let i = 0; i < pos.count; i += 1) {
+      const ix = i * 3;
+      const x = base[ix];
+      const y = base[ix + 1];
+      const wave =
+        Math.sin(x * 0.18 + elapsed * 0.6) * 0.08 +
+        Math.cos(y * 0.22 - elapsed * 0.45) * 0.06;
+      pos.array[ix + 2] = base[ix + 2] + wave;
+    }
+    pos.needsUpdate = true;
+    geo.computeVertexNormals();
+  }
+}
+
+function createLabels() {
+  STARTUPS.forEach((startup) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "marker-label";
+    button.dataset.id = startup.id;
+    button.dataset.stage = startup.stage ?? "";
+    button.style.setProperty(
+      "--label-color",
+      startup.stage === "Ẩm thực"
+        ? "var(--color-warning)"
+        : startup.stage === "Du lịch"
+          ? "var(--color-accent-2)"
+          : "var(--color-success)",
+    );
+    button.innerHTML = `
+      <img class="marker-label__logo" src="${escapeHtml(logoPath(startup))}" data-stage="${escapeHtml(startup.stage ?? "")}" alt="" loading="lazy" decoding="async" draggable="false">
+      <span>${escapeHtml(startup.name)}</span>
+      ${startup.stage ? `<small data-tag>${escapeHtml(tagOf(startup.stage))}</small>` : ""}
+    `;
+    button.addEventListener("click", () => selectStartup(startup.id));
+    labelsLayer.appendChild(button);
+    labelElements.set(startup.id, button);
+  });
+
+}
+
+function updateLabels() {
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  const activeItems = new Set(visibleItems(state.activeAreaId).map((item) => item.id));
+  const activeArea = state.activeAreaId;
+  const keyNames = new Set([
+    "Hồ Gươm & Tháp Rùa",
+    "Lăng Chủ tịch Hồ Chí Minh",
+    "Văn Miếu – Quốc Tử Giám",
+    "Chùa Trấn Quốc",
+    "Cầu Long Biên",
+    "Phở Bát Đàn",
+    "Bún chả Hương Liên",
+    "Cà phê Giảng",
+    "Bia hơi Tạ Hiện",
+    "Chợ Đồng Xuân",
+    "Keangnam Landmark 72",
+    "Lotte Center Hà Nội",
+    "Vinhomes Times City",
+    "Vinhomes Royal City",
+    "SVĐ Quốc gia Mỹ Đình",
+  ]);
+
+  // Phase 1: figure out which labels are visible and where their pins land.
+  const candidates = [];
+  STARTUPS.forEach((startup) => {
+    const marker = startupMarkers.get(startup.id);
+    const label = labelElements.get(startup.id);
+    if (!marker || !label) return;
+    const world = marker.group.position.clone();
+    world.y += 1.55;
+    const projected = world.project(camera);
+    const visibleOnScreen =
+      projected.z > -1 &&
+      projected.z < 1 &&
+      projected.x > -1.08 &&
+      projected.x < 1.08 &&
+      projected.y > -1.08 &&
+      projected.y < 1.08;
+    const inArea = stageAllowed(startup) && (activeArea === "all" || activeItems.has(startup.id));
+    const isKey = keyNames.has(startup.name);
+    const showByMode = state.labelsMode === "all" ? inArea : inArea && (isKey || state.selectedId === startup.id);
+    const selected = state.selectedId === startup.id;
+
+    label.classList.toggle("is-muted", activeArea !== "all" && !activeItems.has(startup.id));
+    label.classList.toggle("is-dimmed", Boolean(state.selectedId) && !selected);
+    label.classList.toggle("is-selected", selected);
+
+    const show = visibleOnScreen && showByMode;
+    if (!show) {
+      label.classList.add("is-hidden");
+      label.classList.remove("has-leader");
+      return;
+    }
+
+    const ay = (-projected.y * 0.5 + 0.5) * height;
+    let w = labelDims.get(startup.id)?.w;
+    let h = labelDims.get(startup.id)?.h;
+    if (!w) {
+      w = label.offsetWidth || 120;
+      h = label.offsetHeight || 28;
+      labelDims.set(startup.id, { w, h });
+    }
+    // Giữ nhãn nằm trọn trong khung trước khi dồn chỗ, nếu không nhãn dài sẽ
+    // bị cắt mất một nửa ở rìa màn hình điện thoại.
+    const margin = w / 2 + 6;
+    const ax = Math.min(Math.max((projected.x * 0.5 + 0.5) * width, margin), Math.max(margin, width - margin));
+    candidates.push({
+      label,
+      ax,
+      ay,
+      w,
+      h,
+      depth: projected.z,
+      priority: selected ? 3 : isKey ? 2 : 1,
+    });
+  });
+
+  // Phase 2: greedy declutter. Higher priority places first; later labels that
+  // collide get pushed straight up, with a leader line back down to their pin.
+  candidates.sort((a, b) => b.priority - a.priority || a.ay - b.ay);
+  const placed = [];
+  const PAD = 3;
+  const STEP = 5;
+  const MAX_SHIFT = 150;
+  candidates.forEach((c) => {
+    let shift = 0;
+    const rectAt = (s) => ({
+      left: c.ax - c.w / 2 - PAD,
+      right: c.ax + c.w / 2 + PAD,
+      top: c.ay - s - 1.1 * c.h - PAD,
+      bottom: c.ay - s - 0.1 * c.h + PAD,
+    });
+    const hits = (r) =>
+      placed.some(
+        (p) => r.left < p.right && r.right > p.left && r.top < p.bottom && r.bottom > p.top,
+      );
+    let rect = rectAt(shift);
+    while (hits(rect) && shift < MAX_SHIFT) {
+      shift += STEP;
+      rect = rectAt(shift);
+    }
+    // Lowest-priority labels that still can't fit step aside (hidden) to keep it tidy.
+    if (hits(rect) && c.priority === 1) {
+      c.label.classList.add("is-hidden");
+      c.label.classList.remove("has-leader");
+      return;
+    }
+    placed.push(rect);
+    c.label.classList.remove("is-hidden");
+    c.label.style.left = `${Math.round(c.ax)}px`;
+    c.label.style.top = `${c.ay - shift}px`;
+    c.label.style.setProperty("--leader", `${shift + 4}px`);
+    c.label.classList.toggle("has-leader", shift > 6);
+  });
+
+  landmarkLabelElements.forEach(({ el, point }) => {
+    const world = project(point.lat, point.lng, point.y);
+    const projected = world.project(camera);
+    const visibleOnScreen =
+      projected.z > -1 &&
+      projected.z < 1 &&
+      projected.x > -1.08 &&
+      projected.x < 1.08 &&
+      projected.y > -1.08 &&
+      projected.y < 1.08;
+    const show = visibleOnScreen && (state.activeAreaId === "all" || state.labelsMode === "all");
+    const half = (el.offsetWidth || 80) / 2 + 6;
+    const lx = (projected.x * 0.5 + 0.5) * width;
+    el.style.left = `${Math.round(Math.min(Math.max(lx, half), Math.max(half, width - half)))}px`;
+    el.style.top = `${(-projected.y * 0.5 + 0.5) * height}px`;
+    el.style.opacity = show ? "1" : "0";
+  });
+}
+
+// Category chips: legend + one-tap filter. Tapping a chip shows only that
+// group's pins; tapping it again brings everything back.
+function renderPinLegend() {
+  const entries = [
+    { stage: "Ẩm thực", css: "var(--color-warning)" },
+    { stage: "Du lịch", css: "var(--color-accent-2)" },
+    { stage: "BĐS", css: "var(--color-success)" },
+  ];
+  pinLegend.innerHTML = entries
+    .map((entry) => {
+      const on = activeStages.size === 0 || activeStages.has(entry.stage);
+      const count = STARTUPS.filter((s) => s.stage === entry.stage).length;
+      return `<button class="pin-legend__item${on ? "" : " is-off"}" type="button" data-stage="${escapeHtml(entry.stage)}" aria-pressed="${activeStages.has(entry.stage)}" title="${escapeHtml(t("filterHint"))}"><i style="background:${entry.css}"></i>${escapeHtml(stageLabel(entry.stage))}<b>${count}</b></button>`;
+    })
+    .join("");
+}
+
+function renderAreaList() {
+  areaList.innerHTML = "";
+  AREAS.forEach((area) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "area-button";
+    button.dataset.area = area.id;
+    const count = visibleItems(area.id).length;
+    button.innerHTML = `<span class="area-button__number">${area.number}</span><span class="area-button__label">${escapeHtml(areaLabel(area))}</span><span class="area-button__count">${count}</span>`;
+    button.addEventListener("click", () => setActiveArea(area.id));
+    areaList.appendChild(button);
+  });
+}
+
+function miniMapPosition(item) {
+  const x = 8 + ((item.lng - 105.752) / 0.153) * 104;
+  const y = 8 + ((21.098 - item.lat) / 0.113) * 144;
+  return { x: Math.max(5, Math.min(115, x)), y: Math.max(5, Math.min(155, y)) };
+}
+
+function renderMiniMap() {
+  miniMapPoints.innerHTML = "";
+  STARTUPS.forEach((startup) => {
+    const point = miniMapPosition(startup);
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("cx", point.x);
+    circle.setAttribute("cy", point.y);
+    circle.setAttribute("r", startup.stage === "Du lịch" ? "2.2" : "1.6");
+    circle.classList.add("mini-point");
+    circle.dataset.id = startup.id;
+    miniMapPoints.appendChild(circle);
+  });
+}
+
+function updateUiState() {
+  document.querySelectorAll(".area-button").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.area === state.activeAreaId);
+  });
+  document.querySelectorAll(".mini-point").forEach((point) => {
+    const item = STARTUPS.find((startup) => startup.id === point.dataset.id);
+    const shown = Boolean(item) && stageAllowed(item);
+    point.style.display = shown ? "" : "none";
+    point.classList.toggle("is-active", shown && (item.area === state.activeAreaId || state.activeAreaId === "all"));
+  });
+  document.body.classList.toggle("is-focused", Boolean(state.selectedId));
+  syncMapMarkers();
+
+  // Slide the active area's description in right below its row.
+  const activeButton = areaList.querySelector(`.area-button[data-area="${state.activeAreaId}"]`);
+  const area = AREA_BY_ID[state.activeAreaId];
+  if (activeButton && area) {
+    areaDescEl.textContent = bi(area.description);
+    activeButton.insertAdjacentElement("afterend", areaDescEl);
+  } else {
+    areaDescEl.remove();
+  }
+}
+
+/* ---------------------------------------------------------------- */
+/* Deep links: #/company/:id and #/area/:id, with back/forward       */
+/* ---------------------------------------------------------------- */
+
+let suppressHashEvent = false;
+
+function writeHash(hash) {
+  if (location.hash === hash) return;
+  suppressHashEvent = true;
+  location.hash = hash;
+}
+
+function shareUrl(hash) {
+  return `${location.origin}${location.pathname}${hash}`;
+}
+
+function applyHashFromLocation() {
+  const hash = location.hash || "#/";
+  const company = hash.match(/^#\/(?:place|company)\/([\w-]+)$/);
+  if (company && STARTUPS.some((s) => s.id === company[1])) {
+    selectStartup(company[1]);
+    return;
+  }
+  const area = hash.match(/^#\/area\/([\w-]+)$/);
+  if (area && AREA_BY_ID[area[1]]) {
+    setActiveArea(area[1]);
+    return;
+  }
+  if (hash === "#/" || hash === "#") setActiveArea("all");
+}
+
+function setActiveArea(areaId, { keepSelection = false } = {}) {
+  state.activeAreaId = areaId;
+  if (!keepSelection) {
+    state.selectedId = null;
+    releaseFocus();
+  }
+  const area = AREA_BY_ID[areaId];
+  flyTo(area.focus);
+  mapFocusArea(areaId);
+  renderAreaDetail(area);
+  updateUiState();
+  if (!keepSelection) {
+    writeHash(areaId === "all" ? "#/" : `#/area/${areaId}`);
+  }
+}
+
+function selectStartup(id) {
+  const startup = STARTUPS.find((item) => item.id === id);
+  if (!startup) return;
+  state.selectedId = id;
+  state.activeAreaId = startup.area;
+  flyTo({ lat: startup.lat, lng: startup.lng, distance: 18, height: 16, rotation: 0.72 }, { cinematic: true });
+  mapFocusPlace(startup);
+  engageFocus(startup);
+  renderStartupDetail(startup);
+  updateUiState();
+  writeHash(`#/place/${id}`);
+}
+
+function renderAreaDetail() {
+  // The card slot shows a persistent "how to explore" guide whenever no
+  // company is selected; selecting a company swaps in its details.
+  if (state.selectedId) {
+    detailCard.classList.add("is-hidden");
+    detailCard.classList.remove("is-onboard");
+    return;
+  }
+  detailCard.classList.add("is-onboard");
+  detailCard.classList.remove("is-hidden");
+  detailCard.innerHTML = `
+    <p class="onboard-title">${escapeHtml(t("onboardTitle"))}</p>
+    <ul class="onboard">
+      <li><span class="onboard__keys"><kbd>↑</kbd><kbd>↓</kbd></span><span>${escapeHtml(t("onboardAreas"))}</span></li>
+      <li><span class="onboard__keys"><kbd>⌘</kbd><kbd>K</kbd></span><span>${escapeHtml(t("onboardSearch"))}</span></li>
+      <li><span class="onboard__keys"><kbd class="onboard__click">${escapeHtml(t("onboardTapKey"))}</kbd></span><span>${escapeHtml(t("onboardTap"))}</span></li>
+    </ul>
+  `;
+}
+
+function renderStartupDetail(startup) {
+  const url = safeUrl(startup.website);
+  const info = COMPANY_INFO[startup.id] || {};
+  const blurb = bi(info.blurb) || startup.notes || `${startup.sector || t("aPlace")} — ${t("onTheMap")}`;
+  const loc = info.loc || areaShort(AREA_BY_ID[startup.area]) || "Hà Nội";
+
+  let host = "";
+  if (url) {
+    try {
+      host = new URL(url).hostname.replace(/^www\./, "");
+    } catch {
+      host = "";
+    }
+  }
+
+  const meta = [stageLabel(startup.stage), startup.office, loc].filter(Boolean).join(" · ");
+  // Optional enrichment fields; rendered only when the data actually has them.
+  const open = openState(startup.hours);
+  const facts = [
+    startup.price ? `${t("price")} ${startup.price}` : null,
+    startup.hours ? `${t("hours")} ${startup.hours}` : null,
+    startup.address ? startup.address : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const lezWard = lezWardOf(startup);
+  const away = distanceTo(startup);
+
+  detailCard.classList.remove("is-hidden", "is-onboard");
+  detailCard.innerHTML = `
+    <button class="detail-card__close" type="button" aria-label="${escapeHtml(t("close"))}">&times;</button>
+    <div class="detail-card__head">
+      <img class="detail-card__logo" src="${escapeHtml(logoPath(startup))}" data-stage="${escapeHtml(startup.stage ?? "")}" alt="" loading="lazy" decoding="async" draggable="false">
+      <div class="detail-card__heading">
+        <h2>${escapeHtml(startup.name)}</h2>
+        ${startup.sector ? `<p class="detail-card__sector">${escapeHtml(startup.sector)}</p>` : ""}
+      </div>
+    </div>
+    ${
+      away || open || lezWard
+        ? `<p class="detail-card__chips">${away ? `<span class="chip chip--near">${escapeHtml(t("away").replace("{d}", away))}</span>` : ""}${open ? `<span class="chip chip--${open.open ? "open" : "shut"}">${escapeHtml(open.text)}</span>` : ""}${lezWard ? `<button class="chip chip--lez" type="button" data-lez title="${escapeHtml(t("lezWarn"))}">${escapeHtml(t("lezInZone"))} · ${escapeHtml(lezWard)}</button>` : ""}</p>`
+        : ""
+    }
+    <p class="detail-card__blurb">${escapeHtml(blurb)}</p>
+    ${meta ? `<p class="detail-card__meta">${escapeHtml(meta)}</p>` : ""}
+    ${facts ? `<p class="detail-card__meta">${escapeHtml(facts)}</p>` : ""}
+    <div class="detail-card__actions">
+      <a class="detail-card__link" href="${escapeHtml(directionsUrl(startup))}" target="_blank" rel="noreferrer">${escapeHtml(t("directions"))} ↗</a>
+      ${url ? `<a class="detail-card__ghost" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(host || "Website")} ↗</a>` : ""}
+      <button class="detail-card__ghost" type="button" data-copy>${escapeHtml(t("copyLink"))}</button>
+    </div>
+  `;
+  const lezChip = detailCard.querySelector("[data-lez]");
+  if (lezChip) {
+    lezChip.addEventListener("click", () => {
+      if (!mapLayerState.lez) toggleMapLayer("lez");
+      else openLezNote();
+    });
+  }
+  const closeBtn = detailCard.querySelector(".detail-card__close");
+  if (closeBtn) closeBtn.addEventListener("click", () => clearSelection());
+  const copyBtn = detailCard.querySelector("[data-copy]");
+  if (copyBtn)
+    copyBtn.addEventListener("click", async () => {
+      copyBtn.textContent = (await copyText(shareUrl(`#/place/${startup.id}`))) ? t("copied") : t("copyFailed");
+      setTimeout(() => {
+        copyBtn.textContent = t("copyLink");
+      }, 1400);
+    });
+}
+
+// Clipboard API first, hidden-textarea execCommand as the fallback.
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try {
+      ok = document.execCommand("copy");
+    } catch {
+      ok = false;
+    }
+    ta.remove();
+    return ok;
+  }
+}
+
+function clearSelection() {
+  state.selectedId = null;
+  releaseFocus();
+  const area = AREA_BY_ID[state.activeAreaId] || AREA_BY_ID.all;
+  renderAreaDetail(area);
+  updateUiState();
+  writeHash(area.id === "all" ? "#/" : `#/area/${area.id}`);
+}
+
+function cameraDestination(focus) {
+  const target = project(focus.lat, focus.lng, 0.8);
+  const rotation = focus.rotation ?? 0.66;
+  const distance = focus.distance ?? 40;
+  const height = focus.height ?? 28;
+
+  // Màn hình dọc thấy một lát rất hẹp của thành phố. Thay vì chỉ lùi camera
+  // ra sau (làm góc nhìn bẹt ra, nửa khung hình thành trời), ta vừa lùi vừa
+  // NGHIÊNG XUỐNG: giữ nguyên hướng ngắm, chỉ đổi bán kính và độ cao.
+  const radius = Math.hypot(distance, height) * viewFit.pull;
+  const pitch = Math.atan2(height, distance) + viewFit.tilt;
+  const flat = Math.cos(pitch) * radius;
+
+  const position = new THREE.Vector3(
+    target.x + Math.sin(rotation) * flat,
+    Math.sin(pitch) * radius,
+    target.z + Math.cos(rotation) * flat,
+  );
+  return { target, position };
+}
+
+function flyTo(focus, { cinematic = false } = {}) {
+  const destination = cameraDestination(focus);
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const flight = {
+    startTime: performance.now(),
+    duration: reduced ? 120 : cinematic ? 1900 : 1300,
+    fromPos: camera.position.clone(),
+    fromTarget: controls.target.clone(),
+    toPos: destination.position,
+    toTarget: destination.target,
+  };
+
+  // Startup selections dolly along a lift -> arc -> settle curve instead of a
+  // straight lerp, so flying across the city reads like a camera move.
+  if (cinematic && !reduced) {
+    const from = flight.fromPos.clone();
+    const to = flight.toPos.clone();
+    const dist = from.distanceTo(to);
+    const lift = Math.min(30, 8 + dist * 0.34);
+    const mid1 = from.clone().lerp(to, 0.28);
+    mid1.y = Math.max(from.y, to.y) + lift;
+    const mid2 = from.clone().lerp(to, 0.8);
+    mid2.y = to.y + lift * 0.42;
+    flight.path = new THREE.CatmullRomCurve3([from, mid1, mid2, to], false, "centripetal");
+  }
+  state.flight = flight;
+}
+
+function updateFlight() {
+  if (!state.flight) return;
+  const elapsed = performance.now() - state.flight.startTime;
+  const raw = Math.min(1, elapsed / state.flight.duration);
+  const t = 1 - Math.pow(1 - raw, 3);
+  if (state.flight.path) camera.position.copy(state.flight.path.getPointAt(t));
+  else camera.position.lerpVectors(state.flight.fromPos, state.flight.toPos, t);
+  controls.target.lerpVectors(state.flight.fromTarget, state.flight.toTarget, t);
+  if (raw >= 1) state.flight = null;
+}
+
+function updateMarkerScale(time) {
+  const activeItems = new Set(visibleItems(state.activeAreaId).map((item) => item.id));
+  const hasSelection = Boolean(state.selectedId);
+  startupMarkers.forEach(({ group, halo, item }) => {
+    group.visible = stageAllowed(item);
+    if (!group.visible) return;
+    const active = state.activeAreaId === "all" || activeItems.has(item.id);
+    const selected = state.selectedId === item.id;
+    const pulse = 1 + Math.sin(time * 3.2 + item.lat) * 0.04;
+    const scale = selected ? 1.24 * pulse : active ? (hasSelection ? 0.8 : 0.92) : 0.58;
+    group.scale.setScalar(scale);
+    // With a company in focus, every other pin steps back into the haze.
+    const targetOpacity = selected ? 1 : active ? (hasSelection ? 0.45 : 1) : hasSelection ? 0.18 : 0.32;
+    group.children.forEach((child) => {
+      if (child.userData.hitArea) {
+        child.material.opacity = 0;
+        return;
+      }
+      if (child.material?.opacity !== undefined) {
+        child.material.transparent = targetOpacity < 1;
+        child.material.opacity = targetOpacity;
+      }
+    });
+    halo.rotation.z += 0.01;
+  });
+}
+
+function pickMarker(event) {
+  pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
+  pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects(markerMeshes, false);
+  for (const hit of hits) {
+    const item = hit.object?.userData?.item;
+    if (item && stageAllowed(item)) return item;
+  }
+  return null;
+}
+
+function onPointerMove(event) {
+  hoverCandidate = pickMarker(event);
+  canvas.style.cursor = hoverCandidate ? "pointer" : "grab";
+}
+
+function onPointerDown(event) {
+  pointerDown = { x: event.clientX, y: event.clientY, item: pickMarker(event) };
+}
+
+// Selection happens on release so an orbit drag never triggers it. A click on
+// a marker selects it; a click on empty map clears the current selection.
+function onPointerUp(event) {
+  if (!pointerDown) return;
+  const moved = Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y);
+  const item = pointerDown.item;
+  pointerDown = null;
+  if (moved > 6) return; // a drag, not a click
+  if (item) selectStartup(item.id);
+  else if (state.selectedId) clearSelection();
+}
+
+function renderSearchResults(query) {
+  const value = query.trim().toLowerCase();
+  searchActiveIndex = -1;
+
+  // No query: nearest places when we know where the visitor is, otherwise a
+  // few well-known suggestions so the modal is never empty.
+  let results;
+  let heading = "";
+  if (!value && userPos) {
+    results = [...STARTUPS]
+      .map((s) => ({ s, d: metresBetween(userPos, s) }))
+      .sort((a, b) => a.d - b.d)
+      .slice(0, 6)
+      .map((x) => x.s);
+    heading = t("nearestToYou");
+  } else if (!value) {
+    const featured = [
+      "Phở Bát Đàn",
+      "Hồ Gươm & Tháp Rùa",
+      "Bún chả Hương Liên",
+      "Chùa Trấn Quốc",
+      "Cà phê Giảng",
+      "Vinhomes Times City",
+    ];
+    results = featured.map((name) => STARTUPS.find((s) => s.name === name)).filter(Boolean);
+    // Dữ liệu live từ Sheet có thể đổi tên: lấp đầy bằng các địa điểm đầu danh sách.
+    for (const startup of STARTUPS) {
+      if (results.length >= 6) break;
+      if (!results.includes(startup)) results.push(startup);
+    }
+    results = results.slice(0, 6);
+  } else {
+    results = STARTUPS.filter((startup) => {
+      const info = COMPANY_INFO[startup.id] || {};
+      const haystack =
+        `${startup.name} ${startup.sector ?? ""} ${startup.stage ?? ""} ${AREA_BY_ID[startup.area]?.label ?? ""} ${info.loc ?? ""} ${info.blurb ?? ""}`.toLowerCase();
+      return haystack.includes(value);
+    }).slice(0, 8);
+  }
+
+  if (!results.length) {
+    searchResults.innerHTML = `<div class="search-result" aria-disabled="true"><span class="search-result__body"><strong>${escapeHtml(t("noResults"))}</strong><span>${escapeHtml(t("noResultsHint"))}</span></span></div><a class="search-results__cta" href="${escapeHtml(suggestUrl())}" target="_blank" rel="noreferrer noopener">${escapeHtml(t("suggestCta"))} ↗</a>`;
+    return;
+  }
+
+  searchResults.innerHTML =
+    (heading ? `<p class="search-results__head">${escapeHtml(heading)}</p>` : "") +
+    results
+      .map((startup) => {
+        const info = COMPANY_INFO[startup.id] || {};
+        const away = distanceTo(startup);
+        const sub = [startup.sector && startup.sector !== "Mapped startup" ? startup.sector : null, info.loc]
+          .filter(Boolean)
+          .join(" · ");
+        return `
+        <button class="search-result" type="button" role="option" data-id="${startup.id}">
+          <img class="search-result__logo" src="${escapeHtml(logoPath(startup))}" data-stage="${escapeHtml(startup.stage ?? "")}" alt="" loading="lazy" decoding="async">
+          <span class="search-result__body">
+            <strong>${escapeHtml(startup.name)}</strong>
+            <span>${escapeHtml(sub || t("aPlace"))}</span>
+          </span>
+          ${away ? `<span class="search-result__dist">${escapeHtml(away)}</span>` : ""}
+        </button>
+      `;
+      })
+      .join("");
+}
+
+function searchResultButtons() {
+  return [...searchResults.querySelectorAll(".search-result[data-id]")];
+}
+
+function setSearchActive(index) {
+  const buttons = searchResultButtons();
+  if (!buttons.length) return;
+  searchActiveIndex = (index + buttons.length) % buttons.length;
+  buttons.forEach((b, i) => b.classList.toggle("is-active", i === searchActiveIndex));
+  buttons[searchActiveIndex].scrollIntoView({ block: "nearest" });
+}
+
+function openSearch() {
+  if (searchModal.open) return;
+  searchInput.value = "";
+  renderSearchResults("");
+  searchModal.showModal();
+  requestAnimationFrame(() => searchInput.focus());
+}
+
+function closeSearch() {
+  if (searchModal.open) searchModal.close();
+}
+
+function bindEvents() {
+  window.addEventListener("resize", () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    // Rotating a phone changes how much city fits: re-fit and re-frame.
+    const before = viewFit.pull;
+    measureViewFit();
+    if (Math.abs(before - viewFit.pull) > 0.02 && !state.selectedId) {
+      flyTo((AREA_BY_ID[state.activeAreaId] || AREA_BY_ID.all).focus);
+    }
+  });
+
+  pinLegend.addEventListener("click", (event) => {
+    const chip = event.target.closest(".pin-legend__item[data-stage]");
+    if (!chip) return;
+    toggleStage(chip.dataset.stage);
+  });
+
+  canvas.addEventListener("pointermove", onPointerMove);
+  canvas.addEventListener("pointerdown", onPointerDown);
+  canvas.addEventListener("pointerup", onPointerUp);
+  canvas.addEventListener("pointercancel", () => {
+    pointerDown = null;
+  });
+
+  searchTrigger.addEventListener("click", openSearch);
+
+  searchInput.addEventListener("input", () => renderSearchResults(searchInput.value));
+  searchInput.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setSearchActive(searchActiveIndex + 1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setSearchActive(searchActiveIndex - 1);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      const buttons = searchResultButtons();
+      const choice = buttons[searchActiveIndex] || buttons[0];
+      if (choice) {
+        selectStartup(choice.dataset.id);
+        closeSearch();
+      }
+    }
+  });
+
+  searchResults.addEventListener("click", (event) => {
+    const button = event.target.closest(".search-result[data-id]");
+    if (!button) return;
+    selectStartup(button.dataset.id);
+    closeSearch();
+  });
+
+  // Click on the backdrop (outside the content) closes the dialog.
+  searchModal.addEventListener("click", (event) => {
+    if (event.target === searchModal) closeSearch();
+  });
+
+  window.addEventListener("keydown", (event) => {
+    const isSearchShortcut = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k";
+    if (isSearchShortcut) {
+      event.preventDefault();
+      if (searchModal.open) closeSearch();
+      else openSearch();
+      return;
+    }
+
+    // Don't hijack typing or the open search dialog.
+    if (searchModal.open) return;
+    const tag = document.activeElement?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+    // ↑ / ↓ cycle through every view, wrapping between Brooklyn and Whole Board.
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const current = Math.max(0, AREAS.findIndex((a) => a.id === state.activeAreaId));
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      const next = (current + direction + AREAS.length) % AREAS.length;
+      setActiveArea(AREAS[next].id);
+    }
+  });
+
+  const brand = document.querySelector(".brand");
+  if (brand)
+    brand.addEventListener("click", (event) => {
+      event.preventDefault();
+      setActiveArea("all");
+    });
+
+  // Browser back/forward re-applies the hash route.
+  window.addEventListener("hashchange", () => {
+    if (suppressHashEvent) {
+      suppressHashEvent = false;
+      return;
+    }
+    applyHashFromLocation();
+  });
+
+}
+
+function animate() {
+  const delta = Math.min(clock.getDelta(), 0.04);
+  const elapsed = clock.elapsedTime;
+  // Ở chế độ bản đồ thật khung 3D bị che hẳn: ngừng vẽ cho đỡ tốn pin, nhưng
+  // vẫn giữ vòng lặp sống nên bấm quay lại là hiện ngay, không phải dựng lại.
+  if (mapMode) {
+    window.requestAnimationFrame(animate);
+    return;
+  }
+  updateFlight();
+  updateWater(elapsed);
+  updateVehicles(delta);
+  updatePedestrians(delta, elapsed);
+  updateTransit(delta);
+  updateClouds(delta);
+  updateBirds(elapsed);
+  updateMarkerScale(elapsed);
+  updateFocusFx(elapsed, delta);
+  updateRain(delta);
+  updateNightLights(elapsed);
+  updateHere(elapsed);
+  controls.update();
+  // Live-weather fog rides ON TOP of the focus-easing fog: multiply just for
+  // this render, then restore, so the two systems never fight over .density.
+  // viewFit.fog thins it on tall screens, where the camera sits further back.
+  const fogNow = scene.fog.density;
+  scene.fog.density = fogNow * liveEnv.fogMul * viewFit.fog;
+  renderer.render(scene, camera);
+  scene.fog.density = fogNow;
+  updateLabels();
+  window.requestAnimationFrame(animate);
+}
+
+function init() {
+  measureViewFit();
+  applyLanguage({ silent: true });
+  createLights();
+  createBaseMap();
+  createStreetTrees();
+  buildTrees();
+  const roadPaths = createStreetNetwork();
+  createSubwayLayer();
+  createBuildings();
+  createPedestrians();
+  createLandmarks();
+  createMarkers();
+  createVehicles(roadPaths);
+  createFerries();
+  createPlanes();
+  createClouds();
+  createBirds();
+  createHaze();
+  createLabels();
+  renderAreaList();
+  renderMiniMap();
+  renderPinLegend();
+  buildHereMarker();
+  bindEvents();
+  mountToolbar();
+  readFilterFromUrl();
+  // Label sizes are cached for the declutter pass; re-measure once the pixel font lands.
+  if (document.fonts?.ready) document.fonts.ready.then(() => labelDims.clear());
+  const initial = cameraDestination(AREA_BY_ID.all.focus);
+  camera.position.copy(initial.position);
+  controls.target.copy(initial.target);
+  renderAreaDetail(AREA_BY_ID.all);
+  updateUiState();
+  // Deep links: land directly on a shared company or area.
+  if (location.hash && location.hash !== "#/") applyHashFromLocation();
+  animate();
+}
+
+/* ==========================================================================
+   LỚP DỮ LIỆU SỐNG · LIVE DATA LAYER
+   1) Google Sheet (Publish to web → CSV) làm CMS: sửa Sheet là bản đồ đổi theo.
+   2) Open-Meteo: thời tiết + AQI Hà Nội thật đổ vào bầu trời, sương, mưa, đèn.
+   Không backend, không API key. Mất mạng / link hỏng → im lặng dùng dữ liệu
+   đóng gói sẵn, bản đồ không bao giờ trắng trang.
+   Thử nhanh: ?wx=rain,night&aqi=180 · ?sheet=<link CSV đã publish>
+   ========================================================================== */
+
+const QUERY = new URLSearchParams(location.search);
+
+/* ---------- 1) Google Sheet làm nguồn địa điểm ---------- */
+
+// Dán link "File → Share → Publish to web → CSV" của Google Sheet vào đây.
+// Để trống thì bản đồ dùng dữ liệu đóng gói trong src/data.js.
+const LIVE_SHEET_URL = "";
+
+function csvSourceUrl() {
+  const raw = (QUERY.get("sheet") || LIVE_SHEET_URL || "").trim();
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  // Cho phép dán thẳng ID của Sheet (sheet để "Anyone with the link → Viewer").
+  return `https://docs.google.com/spreadsheets/d/${encodeURIComponent(raw)}/gviz/tq?tqx=out:csv`;
+}
+
+function stripDiacritics(value) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/đ/g, "d")
+    .replace(/Đ/g, "D");
+}
+
+function normKey(value) {
+  return stripDiacritics(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function slugifyId(value) {
+  return (
+    stripDiacritics(value)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48) || "dia-diem"
+  );
+}
+
+// CSV chuẩn RFC: xử lý ngoặc kép, dấu phẩy và xuống dòng trong ô.
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') {
+          field += '"';
+          i += 1;
+        } else inQuotes = false;
+      } else field += ch;
+    } else if (ch === '"') inQuotes = true;
+    else if (ch === ",") {
+      row.push(field);
+      field = "";
+    } else if (ch === "\n") {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
+    } else if (ch !== "\r") field += ch;
+  }
+  if (field.length || row.length) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows.filter((r) => r.some((cell) => cell.trim() !== ""));
+}
+
+// Tên cột linh hoạt: tiếng Việt có dấu/không dấu/tiếng Anh đều nhận.
+const HEADER_ALIASES = {
+  id: ["id", "ma", "slug"],
+  name: ["name", "ten", "tendiadiem", "diadiem", "place"],
+  stage: ["stage", "nhom", "loai", "phanloai", "category"],
+  area: ["area", "khu", "khuvuc", "vung"],
+  lat: ["lat", "vido", "latitude"],
+  lng: ["lng", "lon", "long", "kinhdo", "longitude"],
+  sector: ["sector", "loaihinh", "kieu", "theloai"],
+  office: ["office", "thongtin", "diemnhan", "fact", "ghichu"],
+  price: ["price", "gia", "giathamkhao"],
+  hours: ["hours", "giomo", "mocua", "giohoatdong"],
+  address: ["address", "diachi"],
+  website: ["website", "web", "link", "url"],
+  blurb: ["blurb", "mota", "gioithieu", "description"],
+  loc: ["loc", "vitri", "vitringan"],
+  source: ["source", "nguon"],
+};
+
+function normalizeStage(raw) {
+  const k = normKey(raw).replace(/[0-9]/g, "");
+  if (["amthuc", "an", "food", "eat", "monan", "quanan", "cafe", "caphe"].includes(k)) return "Ẩm thực";
+  if (["dulich", "choi", "travel", "tourism", "thamquan", "ditich", "vanhoa"].includes(k)) return "Du lịch";
+  if (["bds", "batdongsan", "o", "nha", "realestate", "housing", "duan", "chungcu"].includes(k)) return "BĐS";
+  return "Du lịch";
+}
+
+// Khu vực sai/thiếu → gán về khu có tâm camera gần nhất (trừ "all").
+function nearestAreaId(lat, lng) {
+  let best = "pho-co";
+  let bestD = Infinity;
+  for (const area of AREAS) {
+    if (area.id === "all" || !area.focus) continue;
+    const dx = (area.focus.lng - lng) * 1101;
+    const dz = (area.focus.lat - lat) * 1180;
+    const d = dx * dx + dz * dz;
+    if (d < bestD) {
+      bestD = d;
+      best = area.id;
+    }
+  }
+  return best;
+}
+
+const AREA_KEY_LOOKUP = (() => {
+  const map = new Map();
+  for (const area of AREAS) {
+    for (const key of [area.id, area.label, area.shortLabel]) {
+      if (key) map.set(normKey(key), area.id);
+    }
+  }
+  return map;
+})();
+
+function rowsToPlaces(rows) {
+  const [header, ...body] = rows;
+  const colOf = {};
+  (header || []).forEach((cell, index) => {
+    const key = normKey(cell);
+    for (const [field, aliases] of Object.entries(HEADER_ALIASES)) {
+      if (colOf[field] == null && aliases.includes(key)) colOf[field] = index;
+    }
+  });
+  const pick = (row, field) => {
+    const index = colOf[field];
+    return index == null ? "" : String(row[index] ?? "").trim();
+  };
+
+  const places = [];
+  const info = {};
+  const used = new Set();
+  let skipped = 0;
+
+  for (const row of body) {
+    const name = pick(row, "name");
+    const lat = Number(pick(row, "lat").replace(",", "."));
+    const lng = Number(pick(row, "lng").replace(",", "."));
+    // Bỏ dòng thiếu tên/toạ độ hoặc rơi ra ngoài khung Hà Nội của bản đồ.
+    if (!name || !Number.isFinite(lat) || !Number.isFinite(lng) || lat < 20.9 || lat > 21.16 || lng < 105.68 || lng > 106.03) {
+      skipped += 1;
+      continue;
+    }
+
+    let id = slugifyId(pick(row, "id") || name);
+    while (used.has(id)) id = `${id}-2`;
+    used.add(id);
+
+    const areaKey = AREA_KEY_LOOKUP.get(normKey(pick(row, "area")));
+    const sourceRaw = normKey(pick(row, "source"));
+
+    const place = {
+      id,
+      name,
+      stage: normalizeStage(pick(row, "stage")),
+      area: areaKey && areaKey !== "all" ? areaKey : nearestAreaId(lat, lng),
+      lat,
+      lng,
+    };
+    const sector = pick(row, "sector");
+    const office = pick(row, "office");
+    const price = pick(row, "price");
+    const hours = pick(row, "hours");
+    const address = pick(row, "address");
+    const website = pick(row, "website");
+    if (sector) place.sector = sector;
+    if (office) place.office = office;
+    if (price) place.price = price;
+    if (hours) place.hours = hours;
+    if (address) place.address = address;
+    if (website) place.website = website;
+    if (["approx", "xapxi", "gandung", "uocluong"].includes(sourceRaw)) place.source = "approx";
+    places.push(place);
+
+    const blurb = pick(row, "blurb");
+    const loc = pick(row, "loc");
+    if (blurb || loc) info[id] = { ...(blurb && { blurb }), ...(loc && { loc }) };
+  }
+
+  return { places, info, skipped };
+}
+
+function applyLivePlaces(places, info) {
+  // Mảng/object export từ data.js được thay ruột tại chỗ TRƯỚC khi init()
+  // chạy, nên marker, nhãn, mini map, đếm khu vực… đều dựng từ dữ liệu live.
+  STARTUPS.length = 0;
+  STARTUPS.push(...places);
+  for (const key of Object.keys(COMPANY_INFO)) delete COMPANY_INFO[key];
+  Object.assign(COMPANY_INFO, info);
+
+  const sub = document.querySelector(".brand__sub");
+  if (sub) sub.textContent = `${STARTUPS.length} địa điểm · ăn ᐧ chơi ᐧ ở`;
+  if (searchInput) searchInput.placeholder = `Tìm ${STARTUPS.length} địa điểm: phở, di tích, dự án, khu vực…`;
+  const allArea = AREA_BY_ID.all;
+  if (allArea?.description)
+    allArea.description = `${STARTUPS.length} địa điểm ẩm thực, du lịch và bất động sản — nạp trực tiếp từ Google Sheet. · ${STARTUPS.length} places to eat, explore, and live — loaded live from a Google Sheet.`;
+}
+
+async function bootLivePlaces() {
+  const src = csvSourceUrl();
+  if (!src) return;
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 7000);
+    const res = await fetch(src, { cache: "no-store", redirect: "follow", signal: ctl.signal });
+    clearTimeout(timer);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+    if (/<html/i.test(text.slice(0, 400))) throw new Error("Nhận về HTML thay vì CSV — Sheet chưa Publish to web?");
+    const { places, info, skipped } = rowsToPlaces(parseCsv(text));
+    if (places.length < 3) throw new Error(`chỉ ${places.length} dòng hợp lệ (bỏ qua ${skipped})`);
+    applyLivePlaces(places, info);
+    window.__liveData = { source: src, places: places.length, skipped };
+    console.info(`[HanoiAtlas] Sheet live: ${places.length} địa điểm (bỏ qua ${skipped} dòng).`);
+  } catch (error) {
+    window.__liveData = { source: src, error: String(error) };
+    console.warn("[HanoiAtlas] Không nạp được Sheet, dùng dữ liệu đóng gói.", error);
+  }
+}
+
+/* ---------- 2) Thời tiết + AQI Hà Nội thật ---------- */
+
+// animate() đọc fogMul mỗi khung hình (nhân đè lên fog easing rồi trả lại).
+const liveEnv = { fogMul: 1 };
+
+// Mỗi chế độ trời: gradient trời, màu + hệ số sương, đèn, phơi sáng, mây, nước.
+const ENV_PRESETS = {
+  clear: { sky: ["#6fa8d6", "#9cc7e6", "#cfe6f2", "#e4f0f6"], fog: "#cfe6f2", fogMul: 1, sun: 1, hemi: 1, exp: 1.05, glow: 0.85, cloud: ["#f4f1e8", 0.72], water: 1, haze: 0.55 },
+  partly: { sky: ["#7dabd2", "#a3c6e0", "#ccdfe9", "#dfeaf0"], fog: "#ccdfe9", fogMul: 1.06, sun: 0.82, hemi: 0.9, exp: 1.02, glow: 0.6, cloud: ["#eef0ee", 0.8], water: 0.95, haze: 0.55 },
+  overcast: { sky: ["#8d9aa6", "#aab4bd", "#c9d0d5", "#d8dde0"], fog: "#c9d0d5", fogMul: 1.14, sun: 0.42, hemi: 0.78, exp: 0.98, glow: 0.15, cloud: ["#b9c0c7", 0.88], water: 0.82, haze: 0.5 },
+  rain: { sky: ["#6d7a87", "#8b96a1", "#b3bcc3", "#c5ccd1"], fog: "#b8c0c7", fogMul: 1.3, sun: 0.32, hemi: 0.66, exp: 0.92, glow: 0, cloud: ["#8e979f", 0.92], water: 0.7, haze: 0.4, rain: 1 },
+  storm: { sky: ["#525f6d", "#707c88", "#98a2ab", "#aab3ba"], fog: "#9aa4ad", fogMul: 1.45, sun: 0.22, hemi: 0.55, exp: 0.88, glow: 0, cloud: ["#79828b", 0.95], water: 0.6, haze: 0.35, rain: 1.4 },
+  fog: { sky: ["#a8b4bc", "#c2ccd2", "#dde3e6", "#e8ecee"], fog: "#dde3e6", fogMul: 1.85, sun: 0.4, hemi: 0.82, exp: 1, glow: 0.1, cloud: ["#d8dde2", 0.5], water: 0.85, haze: 0.7 },
+  dusk: { sky: ["#41517a", "#7a6f93", "#d99a6c", "#f0c898"], fog: "#e3bd93", fogMul: 1.08, sun: 0.75, hemi: 0.7, exp: 1, glow: 0.95, cloud: ["#e8c9a8", 0.7], water: 0.85, haze: 0.45, sunColor: "#ffb37a", hemiSky: "#c9b8d9" },
+  night: { sky: ["#0d1626", "#15233c", "#2a3a55", "#3a4a63"], fog: "#1c2534", fogMul: 1.05, sun: 0.1, hemi: 0.44, exp: 0.88, glow: 0, cloud: ["#2a3345", 0.5], water: 0.42, haze: 0.15, sunColor: "#a9c2ff", hemiSky: "#93a9d0", hemiGround: "#241f28", nightGlow: 1 },
+  "night-rain": { sky: ["#0b121d", "#121c2b", "#232f40", "#2e3a4a"], fog: "#1a2230", fogMul: 1.35, sun: 0.08, hemi: 0.4, exp: 0.86, glow: 0, cloud: ["#232c3a", 0.6], water: 0.4, haze: 0.12, sunColor: "#a9c2ff", hemiSky: "#93a9d0", hemiGround: "#241f28", rain: 1, nightGlow: 1 },
+};
+
+const AQI_TINT = new THREE.Color("#b7a98c");
+
+function makeLiveSky(stops) {
+  const c = document.createElement("canvas");
+  c.width = 16;
+  c.height = 256;
+  const ctx = c.getContext("2d");
+  const grad = ctx.createLinearGradient(0, 0, 0, 256);
+  grad.addColorStop(0, stops[0]);
+  grad.addColorStop(0.45, stops[1]);
+  grad.addColorStop(0.8, stops[2]);
+  grad.addColorStop(1, stops[3]);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 16, 256);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// US AQI → hệ số sương + màu chấm + nhãn (dịch theo ngôn ngữ đang chọn).
+function aqiInfo(aqi) {
+  if (aqi == null || !Number.isFinite(Number(aqi))) return { mul: 1, color: "#8fa3b8", key: null };
+  const v = Number(aqi);
+  if (v <= 50) return { mul: 0.92, color: "#3fbf6f", key: "aqiGood" };
+  if (v <= 100) return { mul: 1, color: "#e8c33f", key: "aqiFair" };
+  if (v <= 150) return { mul: 1.18, color: "#e8923f", key: "aqiPoor" };
+  if (v <= 200) return { mul: 1.4, color: "#e0524a", key: "aqiBad" };
+  if (v <= 300) return { mul: 1.65, color: "#9d5fc9", key: "aqiVeryBad" };
+  return { mul: 1.9, color: "#8a3b47", key: "aqiHazard" };
+}
+
+// Chế độ trời → chữ hiển thị trên huy hiệu, theo ngôn ngữ đang chọn.
+const WX_KEY = {
+  clear: "wxClear",
+  partly: "wxPartly",
+  overcast: "wxOvercast",
+  rain: "wxRain",
+  drizzle: "wxDrizzle",
+  storm: "wxStorm",
+  fog: "wxFog",
+  dusk: "wxDusk",
+  night: "wxNight",
+  "night-rain": "wxNightRain",
+};
+
+function wxText(env) {
+  const key = WX_KEY[env.drizzle ? "drizzle" : env.mode];
+  return key ? t(key) : env.desc || "";
+}
+
+let rainPoints = null;
+let rainSpeeds = null;
+
+function ensureRain(intensity) {
+  if (!intensity) {
+    if (rainPoints) rainPoints.visible = false;
+    return;
+  }
+  if (!rainPoints) {
+    const count = smallScreen ? 850 : 1500;
+    const positions = new Float32Array(count * 3);
+    rainSpeeds = new Float32Array(count);
+    for (let i = 0; i < count; i += 1) {
+      positions[i * 3] = -96 + Math.random() * 192;
+      positions[i * 3 + 1] = Math.random() * 52;
+      positions[i * 3 + 2] = -86 + Math.random() * 152;
+      rainSpeeds[i] = 20 + Math.random() * 12;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    rainPoints = new THREE.Points(
+      geo,
+      new THREE.PointsMaterial({ color: 0xaebfcf, size: 0.085, transparent: true, opacity: 0.5, depthWrite: false }),
+    );
+    rainPoints.frustumCulled = false;
+    rainPoints.renderOrder = 6;
+    scene.add(rainPoints);
+  }
+  rainPoints.visible = true;
+  rainPoints.material.opacity = intensity >= 1.4 ? 0.62 : 0.48;
+}
+
+function updateRain(delta) {
+  if (!rainPoints || !rainPoints.visible) return;
+  const pos = rainPoints.geometry.attributes.position;
+  const arr = pos.array;
+  for (let i = 0; i < rainSpeeds.length; i += 1) {
+    const ix = i * 3;
+    arr[ix + 1] -= rainSpeeds[i] * delta;
+    arr[ix] += delta * 2.2; // gió xiên nhẹ
+    if (arr[ix + 1] < 0.4) {
+      arr[ix + 1] = 46 + Math.random() * 8;
+      arr[ix] = -96 + Math.random() * 192;
+      arr[ix + 2] = -86 + Math.random() * 152;
+    } else if (arr[ix] > 96) arr[ix] = -96;
+  }
+  pos.needsUpdate = true;
+}
+
+function applyEnvironment(env) {
+  const p = ENV_PRESETS[env.mode] || ENV_PRESETS.clear;
+  const aqi = aqiInfo(env.aqi);
+
+  const oldSky = scene.background;
+  scene.background = makeLiveSky(p.sky);
+  if (oldSky?.dispose) oldSky.dispose();
+
+  const fogColor = new THREE.Color(p.fog);
+  // AQI cao nhuộm sương ngả nâu vàng (ban ngày) — đúng chất trời bụi Hà Nội.
+  if (!p.nightGlow) fogColor.lerp(AQI_TINT, Math.min(0.45, Math.max(0, (aqi.mul - 1) * 0.55)));
+  scene.fog.color.copy(fogColor);
+  liveEnv.fogMul = Math.min(2.3, Math.max(0.85, p.fogMul * aqi.mul));
+
+  renderer.toneMappingExposure = p.exp;
+
+  scene.traverse((obj) => {
+    if (obj.isDirectionalLight) {
+      obj.intensity = 3.45 * p.sun;
+      obj.color.set(p.sunColor || "#ffedc9");
+    } else if (obj.isHemisphereLight) {
+      obj.intensity = 2.75 * p.hemi;
+      obj.color.set(p.hemiSky || "#dbefff");
+      obj.groundColor.set(p.hemiGround || "#4a4335");
+    } else if (obj.isSprite && obj.scale.x > 100) {
+      obj.material.opacity = 0.85 * p.glow; // vầng mặt trời
+    } else if (obj.isMesh && obj.renderOrder === 4 && obj.material?.map && obj.material.transparent) {
+      obj.material.opacity = p.haze; // các thảm haze rìa bản đồ
+    }
+  });
+
+  // Mây đổi màu theo trời.
+  scene.children.forEach((child) => {
+    const mat = child.userData.speed ? child.children[0]?.material : null;
+    if (mat) {
+      mat.color.set(p.cloud[0]);
+      mat.opacity = p.cloud[1];
+    }
+  });
+
+  // Mặt nước tối dần theo trời (giữ màu gốc để phục hồi).
+  const waterMats = new Set([materials.water, materials.pond]);
+  waterSurfaces.forEach((w) => waterMats.add(w.material));
+  waterMats.forEach((mat) => {
+    if (!mat) return;
+    if (!mat.userData.baseColor) mat.userData.baseColor = mat.color.clone();
+    mat.color.copy(mat.userData.baseColor).multiplyScalar(p.water);
+  });
+
+  // Đêm: kính các tháp Keangnam/Lotte/Landmark hắt sáng như thật.
+  if (p.nightGlow) {
+    towerGlass.emissive.setHex(0x3d6a94);
+    towerGlass.emissiveIntensity = 2.0;
+  } else {
+    towerGlass.emissive.setHex(0x0d1e2a);
+    towerGlass.emissiveIntensity = 1;
+  }
+
+  ensureRain(p.rain || 0);
+  setNightLights(Boolean(p.nightGlow));
+}
+
+/* ---------- Huy hiệu thời tiết trên HUD ---------- */
+
+let liveBadgeEl = null;
+let lastEnv = null;
+
+function renderLiveBadge(env) {
+  lastEnv = env;
+  if (!liveBadgeEl) {
+    const style = document.createElement("style");
+    style.textContent = `
+.live-badge{display:inline-flex;align-items:center;gap:.42rem;padding:.4rem .72rem;border-radius:999px;background:rgba(11,16,23,.58);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.14);color:#e9eff6;font-size:.74rem;letter-spacing:.01em;white-space:nowrap;pointer-events:auto;user-select:none;-webkit-user-select:none}
+.live-badge__dot{width:.52rem;height:.52rem;border-radius:50%;flex:none;box-shadow:0 0 7px 0 currentColor}
+.live-badge__aqi{font-variant-numeric:tabular-nums;opacity:.92}
+.live-badge__demo{font-size:.62rem;opacity:.65;border:1px solid rgba(255,255,255,.25);border-radius:.5rem;padding:.05rem .3rem}
+@media (max-width:54rem){.live-badge__txt{display:none}}
+`;
+    document.head.appendChild(style);
+    liveBadgeEl = document.createElement("div");
+    liveBadgeEl.className = "live-badge";
+    liveBadgeEl.setAttribute("role", "status");
+    // Huy hiệu thời tiết cũng là cửa vào bảng nguồn: trên điện thoại thanh
+    // bên bị ẩn nên đây là chỗ luôn chạm tới được.
+    liveBadgeEl.tabIndex = 0;
+    liveBadgeEl.style.cursor = "pointer";
+    liveBadgeEl.addEventListener("click", () => openSources());
+    liveBadgeEl.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openSources();
+      }
+    });
+    const host = document.querySelector(".hud-top-right");
+    if (host) host.prepend(liveBadgeEl);
+    else document.body.appendChild(liveBadgeEl);
+  }
+  const aqi = aqiInfo(env.aqi);
+  const temp = Number.isFinite(env.temp) ? `${env.temp}° ` : "";
+  liveBadgeEl.innerHTML = `
+    <span class="live-badge__ico">${env.icon}</span>
+    <span class="live-badge__txt">${escapeHtml(`${temp}${wxText(env)}`)}</span>
+    ${env.aqi != null ? `<span class="live-badge__dot" style="background:${aqi.color};color:${aqi.color}"></span><span class="live-badge__aqi">AQI ${Math.round(env.aqi)}</span>` : ""}
+    ${env.demo ? `<span class="live-badge__demo">demo</span>` : ""}
+  `;
+  liveBadgeEl.title = [
+    env.demo ? t("wxDemo") : t("wxTitle"),
+    Number.isFinite(env.humidity) ? t("wxHumidity", { v: env.humidity }) : null,
+    Number.isFinite(env.wind) && env.wind > 0 ? t("wxWind", { v: env.wind }) : null,
+    env.aqi != null && aqi.key ? `US AQI ${Math.round(env.aqi)} — ${t(aqi.key)}` : null,
+    env.demo ? null : t("wxSource"),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/* ---------- Gọi Open-Meteo (miễn phí, không key, có CORS) ---------- */
+
+// Mã thời tiết WMO + ngày/đêm → chế độ trời của bản đồ.
+function classifyWeather(code, isDay) {
+  const rain = (code >= 51 && code <= 67) || (code >= 80 && code <= 82);
+  const storm = code >= 95;
+  const foggy = code === 45 || code === 48;
+  if (!isDay) {
+    if (rain || storm) return { mode: "night-rain", desc: storm ? "Đêm mưa dông" : "Đêm mưa", icon: "🌧" };
+    return { mode: "night", desc: foggy ? "Đêm sương mù" : "Đêm quang", icon: "🌙" };
+  }
+  if (storm) return { mode: "storm", desc: "Mưa dông", icon: "⛈" };
+  if (rain) return { mode: "rain", drizzle: code <= 57, desc: code <= 57 ? "Mưa phùn" : "Mưa", icon: "🌧" };
+  if (foggy) return { mode: "fog", desc: "Sương mù", icon: "🌫" };
+  if (code >= 3) return { mode: "overcast", desc: "Nhiều mây", icon: "☁️" };
+  const hour = Number(
+    new Intl.DateTimeFormat("en-GB", { hour: "2-digit", hour12: false, timeZone: "Asia/Bangkok" }).format(new Date()),
+  );
+  if (hour >= 17 && hour < 19) return { mode: "dusk", desc: "Hoàng hôn", icon: "🌇" };
+  if (code >= 1) return { mode: "partly", desc: "Ít mây", icon: "🌤" };
+  return { mode: "clear", desc: "Trời quang", icon: "☀️" };
+}
+
+async function fetchLiveWeather() {
+  const base = "latitude=21.03&longitude=105.85&timezone=Asia%2FBangkok";
+  const [wx, aq] = await Promise.all([
+    fetch(`https://api.open-meteo.com/v1/forecast?${base}&current=temperature_2m,relative_humidity_2m,weather_code,is_day,wind_speed_10m`).then((r) => r.json()),
+    fetch(`https://air-quality-api.open-meteo.com/v1/air-quality?${base}&current=us_aqi,pm2_5`)
+      .then((r) => r.json())
+      .catch(() => null),
+  ]);
+  const cur = wx?.current;
+  if (!cur) return null;
+  const cls = classifyWeather(Number(cur.weather_code ?? 0), cur.is_day === 1);
+  return {
+    ...cls,
+    temp: Math.round(cur.temperature_2m),
+    humidity: Math.round(cur.relative_humidity_2m ?? NaN),
+    wind: Math.round(cur.wind_speed_10m ?? NaN),
+    aqi: aq?.current?.us_aqi ?? null,
+  };
+}
+
+function bootWeather() {
+  const wxParam = QUERY.get("wx");
+  const aqiParam = QUERY.get("aqi");
+
+  // ?wx=rain,night&aqi=180 — xem trước mọi chế độ trời không cần chờ trời thật.
+  if (wxParam !== null || aqiParam !== null) {
+    const flags = new Set(
+      (wxParam || "")
+        .split(",")
+        .map((s) => normKey(s))
+        .filter(Boolean),
+    );
+    const night = flags.has("night") || flags.has("dem");
+    const rain = flags.has("rain") || flags.has("mua");
+    const storm = flags.has("storm") || flags.has("dong");
+    let mode = "clear";
+    if (night) mode = rain || storm ? "night-rain" : "night";
+    else if (storm) mode = "storm";
+    else if (rain) mode = "rain";
+    else if (flags.has("fog") || flags.has("suong") || flags.has("suongmu")) mode = "fog";
+    else if (flags.has("overcast") || flags.has("may")) mode = "overcast";
+    else if (flags.has("dusk") || flags.has("hoanghon")) mode = "dusk";
+    else if (flags.has("partly")) mode = "partly";
+    const LABELS = {
+      clear: ["Trời quang", "☀️"],
+      partly: ["Ít mây", "🌤"],
+      overcast: ["Nhiều mây", "☁️"],
+      rain: ["Mưa", "🌧"],
+      storm: ["Mưa dông", "⛈"],
+      fog: ["Sương mù", "🌫"],
+      dusk: ["Hoàng hôn", "🌇"],
+      night: ["Đêm quang", "🌙"],
+      "night-rain": ["Đêm mưa", "🌧"],
+    };
+    const env = {
+      mode,
+      desc: LABELS[mode][0],
+      icon: LABELS[mode][1],
+      temp: NaN,
+      humidity: NaN,
+      wind: NaN,
+      aqi: aqiParam != null && aqiParam !== "" ? Number(aqiParam) : null,
+      demo: true,
+    };
+    applyEnvironment(env);
+    renderLiveBadge(env);
+    return;
+  }
+
+  const tick = () => {
+    fetchLiveWeather()
+      .then((env) => {
+        if (!env) return;
+        applyEnvironment(env);
+        renderLiveBadge(env);
+      })
+      .catch(() => {}); // mất mạng → giữ nguyên trời hiện tại
+  };
+  tick();
+  setInterval(tick, 15 * 60 * 1000);
+}
+
+/* ---------- Icon dự phòng cho địa điểm mới thêm từ Sheet ---------- */
+
+const CATEGORY_ICON = { "Ẩm thực": "_cat-am-thuc", "Du lịch": "_cat-du-lich", BĐS: "_cat-bds" };
+
+// Ảnh /logos/<id>.svg chưa tồn tại (địa điểm mới) → rơi về icon nhóm.
+document.addEventListener(
+  "error",
+  (event) => {
+    const el = event.target;
+    if (!(el instanceof HTMLImageElement)) return;
+    if (!/(?:marker-label__logo|detail-card__logo|search-result__logo|map-pin__logo)/.test(el.className)) return;
+    const stage = el.dataset.stage || el.closest("[data-stage]")?.dataset.stage || "";
+    const fallback = `/logos/${CATEGORY_ICON[stage] || "_cat-default"}.svg`;
+    if (el.src.endsWith(fallback)) return; // icon nhóm cũng hỏng thì dừng, tránh lặp vô hạn
+    el.src = fallback;
+  },
+  true,
+);
+
+/* ==========================================================================
+   TIỆN ÍCH HẰNG NGÀY · EVERYDAY TOOLS
+   1) Nút VI | EN đổi toàn bộ giao diện và mô tả địa điểm.
+   2) Chip Ăn / Chơi / Ở lọc pin ngay trên bản đồ, chia sẻ được cả link đã lọc.
+   3) "Gần tôi": định vị GPS, khoảng cách tới từng nơi, nút Chỉ đường.
+   4) Đèn đường – đèn nhà – đèn cầu khi trời tối.
+   5) Khung hình tự co theo tỉ lệ màn hình (điện thoại dọc nhìn được cả thành phố).
+   ========================================================================== */
+
+/* ---------- 1) Ngôn ngữ ---------- */
+
+const LANG_KEY = "hanoi-atlas:lang";
+
+function readLang() {
+  const asked = (QUERY.get("lang") || "").toLowerCase();
+  if (asked === "vi" || asked === "en") return asked;
+  try {
+    const saved = localStorage.getItem(LANG_KEY);
+    if (saved === "vi" || saved === "en") return saved;
+  } catch {
+    /* chế độ riêng tư: bỏ qua */
+  }
+  const tags = navigator.languages?.length ? navigator.languages : [navigator.language || "vi"];
+  return tags.some((tag) => /^vi\b/i.test(tag)) ? "vi" : "en";
+}
+
+let LANG = readLang();
+
+const STRINGS = {
+  vi: {
+    title: "Hà Nội Atlas — Bản đồ 3D ẩm thực · du lịch · BĐS",
+    brandSub: "{n} địa điểm · ăn ᐧ chơi ᐧ ở",
+    search: "Tìm kiếm",
+    searchPlaceholder: "Tìm {n} địa điểm: phở, di tích, dự án, khu vực…",
+    searchAria: "Tìm địa điểm",
+    hint: "<kbd>↑</kbd><kbd>↓</kbd> khu vực · <kbd>⌘K</kbd> tìm kiếm · chạm vào pin",
+    credit: 'Dữ liệu chọn lọc thủ công · <a href="#/nguon" data-sources>Nguồn &amp; đối chiếu</a> · Dựng lại từ <a href="https://github.com/Nutlope/nyc-ai-atlas" target="_blank" rel="noreferrer">NYC AI Atlas</a> · 2026',
+    suggest: "Đề xuất địa điểm",
+    onboardTitle: "Cách khám phá",
+    onboardAreas: "Đi qua từng khu vực",
+    onboardSearch: "Tìm địa điểm",
+    onboardTap: "Chạm vào pin để xem chi tiết",
+    onboardTapKey: "chạm",
+    aPlace: "Một địa điểm ở Hà Nội",
+    onTheMap: "trên bản đồ Hà Nội",
+    price: "Giá",
+    hours: "Mở",
+    close: "Đóng",
+    directions: "Chỉ đường",
+    copyLink: "Sao chép link",
+    copied: "Đã sao chép",
+    copyFailed: "Không sao chép được",
+    noResults: "Không tìm thấy",
+    noResultsHint: "Thử tên quán, di tích, dự án, hoặc tên khu vực.",
+    suggestCta: "Biết một địa điểm xứng đáng lên bản đồ? Đề xuất thêm",
+    nearestToYou: "Gần bạn nhất",
+    away: "cách {d}",
+    filterHint: "Chạm để lọc theo nhóm",
+    near: "Gần tôi",
+    nearTitle: "Tìm địa điểm gần chỗ bạn đang đứng",
+    locating: "Đang định vị…",
+    locateDenied: "Bạn chưa cho phép truy cập vị trí. Bật lại trong cài đặt trình duyệt nhé.",
+    locateFail: "Không lấy được vị trí. Thử lại khi có sóng tốt hơn.",
+    outsideHanoi: "Bạn đang ở ngoài Hà Nội — bản đồ vẫn tính khoảng cách từ vị trí thật của bạn.",
+    foundNear: "Gần bạn nhất: {name} · {d}",
+    youAreHere: "Bạn đang ở đây",
+    langSwitch: "Switch to English",
+    openNow: "Đang mở",
+    openUntil: "Mở đến {t}",
+    closedNow: "Đã đóng",
+    opensAt: "Mở lại {t}",
+    installed: "Đã lưu vào màn hình chính — mở lại được cả khi mạng yếu.",
+    stageFood: "Ẩm thực",
+    stageSights: "Du lịch",
+    stageHomes: "BĐS",
+    tagFood: "Ăn",
+    tagSights: "Chơi",
+    tagHomes: "Ở",
+    wxClear: "Trời quang",
+    wxPartly: "Ít mây",
+    wxOvercast: "Nhiều mây",
+    wxRain: "Mưa",
+    wxDrizzle: "Mưa phùn",
+    wxStorm: "Mưa dông",
+    wxFog: "Sương mù",
+    wxDusk: "Hoàng hôn",
+    wxNight: "Đêm quang",
+    wxNightRain: "Đêm mưa",
+    aqiGood: "Tốt",
+    aqiFair: "Trung bình",
+    aqiPoor: "Kém",
+    aqiBad: "Xấu",
+    aqiVeryBad: "Rất xấu",
+    aqiHazard: "Nguy hại",
+    wxTitle: "Thời tiết & không khí Hà Nội theo thời gian thực",
+    wxDemo: "Chế độ demo (?wx=…&aqi=…)",
+    wxHumidity: "Độ ẩm {v}%",
+    wxWind: "Gió {v} km/h",
+    wxSource: "Nguồn: Open-Meteo · tự làm mới mỗi 15 phút",
+    mapReal: "Bản đồ thật",
+    mapRealTitle: "Xem trên bản đồ đường phố thật — đủ từng ngõ ngách (phím M)",
+    map3d: "Bản đồ 3D",
+    map3dTitle: "Quay lại thành phố 3D (phím M)",
+    mapLoading: "Đang tải bản đồ đường phố…",
+    mapFail: "Chưa tải được bản đồ đường phố. Kiểm tra kết nối rồi thử lại nhé.",
+    mapHint: "Pin trên nền này là vị trí thật ngoài đường — phóng to để thấy tên.",
+    mapApprox: "Vị trí ước lượng, chưa dò được trên OpenStreetMap",
+    srcTitle: "Nguồn & đối chiếu",
+    srcLead: "Mọi con số trên bản đồ này đều dẫn được về nguồn. Chỗ nào dựa vào văn bản nhà nước thì ghi rõ số hiệu, cơ quan ban hành, ngày ký và có link mở thẳng văn bản gốc để bạn tự đọc.",
+    srcOpen: "Mở văn bản gốc",
+    srcOpenData: "Mở nguồn",
+    srcChecked: "Đối chiếu lần cuối {d}",
+    srcStale: "Đã quá {n} ngày chưa đối chiếu lại — hãy mở văn bản gốc kiểm tra trước khi tin.",
+    srcSigned: "ký {d}",
+    srcEffective: "hiệu lực {d}",
+    srcReplaces: "Thay thế {v}",
+    srcUse: "Bản đồ dùng để",
+    srcGroupLaw: "Văn bản nhà nước",
+    srcGroupData: "Dữ liệu mở",
+    srcGroupGap: "Chưa có văn bản công bố",
+    srcGapLead: "Những mục dưới đây bản đồ cố tình để trống. Chưa có văn bản nào quy định nên không suy diễn.",
+    srcBadge: "Nguồn",
+    srcClose: "Đóng",
+    layers: "Lớp dữ liệu",
+    lezName: "Vùng phát thải thấp",
+    lezOn: "Hiện ranh giới 9 phường có vùng phát thải thấp",
+    chargeName: "Trạm sạc",
+    chargeOn: "Hiện {n} trạm sạc xe điện lấy từ OpenStreetMap",
+    lezTitle: "Vùng phát thải thấp",
+    lezWhen: "Thí điểm từ 01/7/2026 đến 31/12/2027",
+    lezWhere: "Trong Vành đai 1, thuộc 9 phường: Hai Bà Trưng, Cửa Nam, Hoàn Kiếm, Ô Chợ Dừa, Văn Miếu – Quốc Tử Giám, Ba Đình, Giảng Võ, Ngọc Hà, Tây Hồ.",
+    lezWarn: "Đường kẻ trên bản đồ là ranh giới PHƯỜNG, không phải ranh giới vùng cấm. Vùng thí điểm chỉ là một số khu vực bên trong. Đừng dùng thay biển báo ngoài đường.",
+    lezWhat: "Cấm hẳn: xe tải trên 3.500 kg chạy nhiên liệu hoá thạch; xe máy xăng chạy dịch vụ qua ứng dụng; ô tô nhiên liệu hoá thạch không đạt mức 4. Hạn chế theo khung giờ: xe máy xăng và ô tô chưa đạt chuẩn.",
+    lezHours: "Khung giờ cấm: chưa công bố",
+    lezHoursWhy: "Nghị quyết không ấn định giờ, chờ đề án của UBND thành phố. Bản đồ sẽ không hiện giờ nào cho tới khi có văn bản.",
+    lezNext: "Mốc tiếp theo: 01/01/2028 mở ra Vành đai 1–2, từ 2030 tới Vành đai 3.",
+    lezInZone: "Trong 9 phường có vùng phát thải thấp",
+    chargeTitle: "Trạm sạc xe điện",
+    chargeCount: "{n} trạm trong khung Hà Nội, {v} của VinFast.",
+    chargeWarn: "OpenStreetMap do cộng đồng đóng góp nên có thể thiếu hoặc cũ, và hầu như không ghi trạm nào nhận xe máy điện. Nên gọi trước khi đi xa.",
+    srcSee: "Xem văn bản gốc",
+  },
+  en: {
+    title: "Hanoi Atlas — a 3D map of food, sights & homes",
+    brandSub: "{n} places · eat ᐧ see ᐧ live",
+    search: "Search",
+    searchPlaceholder: "Search {n} places: phở, temples, projects, districts…",
+    searchAria: "Search places",
+    hint: "<kbd>↑</kbd><kbd>↓</kbd> areas · <kbd>⌘K</kbd> search · tap a pin",
+    credit: 'Hand-curated data · <a href="#/nguon" data-sources>Sources &amp; checks</a> · Rebuilt from <a href="https://github.com/Nutlope/nyc-ai-atlas" target="_blank" rel="noreferrer">NYC AI Atlas</a> · 2026',
+    suggest: "Suggest a place",
+    onboardTitle: "How to explore",
+    onboardAreas: "Step through the areas",
+    onboardSearch: "Search any place",
+    onboardTap: "Tap a pin for details",
+    onboardTapKey: "tap",
+    aPlace: "A place in Hanoi",
+    onTheMap: "on the Hanoi map",
+    price: "From",
+    hours: "Open",
+    close: "Close",
+    directions: "Directions",
+    copyLink: "Copy link",
+    copied: "Link copied",
+    copyFailed: "Couldn't copy",
+    noResults: "Nothing found",
+    noResultsHint: "Try a restaurant, landmark, project, or district name.",
+    suggestCta: "Know a place that belongs on this map? Suggest it",
+    nearestToYou: "Closest to you",
+    away: "{d} away",
+    filterHint: "Tap to filter by category",
+    near: "Near me",
+    nearTitle: "Find places close to where you are",
+    locating: "Finding you…",
+    locateDenied: "Location access is off. Turn it back on in your browser settings.",
+    locateFail: "Couldn't get your location. Try again with a better signal.",
+    outsideHanoi: "You're outside Hanoi — distances are still measured from where you actually are.",
+    foundNear: "Closest to you: {name} · {d}",
+    youAreHere: "You are here",
+    langSwitch: "Chuyển sang tiếng Việt",
+    openNow: "Open now",
+    openUntil: "Open until {t}",
+    closedNow: "Closed",
+    opensAt: "Opens {t}",
+    installed: "Saved to your home screen — it opens even on a weak connection.",
+    stageFood: "Food",
+    stageSights: "Sights",
+    stageHomes: "Homes",
+    tagFood: "Eat",
+    tagSights: "See",
+    tagHomes: "Live",
+    wxClear: "Clear",
+    wxPartly: "Partly cloudy",
+    wxOvercast: "Overcast",
+    wxRain: "Rain",
+    wxDrizzle: "Drizzle",
+    wxStorm: "Thunderstorm",
+    wxFog: "Fog",
+    wxDusk: "Sunset",
+    wxNight: "Clear night",
+    wxNightRain: "Rainy night",
+    aqiGood: "Good",
+    aqiFair: "Moderate",
+    aqiPoor: "Unhealthy for sensitive groups",
+    aqiBad: "Unhealthy",
+    aqiVeryBad: "Very unhealthy",
+    aqiHazard: "Hazardous",
+    wxTitle: "Live Hanoi weather & air quality",
+    wxDemo: "Demo mode (?wx=…&aqi=…)",
+    wxHumidity: "Humidity {v}%",
+    wxWind: "Wind {v} km/h",
+    wxSource: "Source: Open-Meteo · refreshes every 15 min",
+    mapReal: "Street map",
+    mapRealTitle: "Switch to the real street map — every lane and alley (press M)",
+    map3d: "3D map",
+    map3dTitle: "Back to the 3D city (press M)",
+    mapLoading: "Loading the street map…",
+    mapFail: "Could not load the street map. Check your connection and try again.",
+    mapHint: "Pins here sit at their real street positions — zoom in for names.",
+    mapApprox: "Approximate position, not yet matched on OpenStreetMap",
+    srcTitle: "Sources & checks",
+    srcLead: "Every figure on this map traces back to a source. Anything resting on a Vietnamese government document carries its number, issuing body and signing date, plus a link straight to the original so you can read it yourself.",
+    srcOpen: "Open the original",
+    srcOpenData: "Open source",
+    srcChecked: "Last checked {d}",
+    srcStale: "Not re-checked for {n} days — open the original before relying on it.",
+    srcSigned: "signed {d}",
+    srcEffective: "in force {d}",
+    srcReplaces: "Replaces {v}",
+    srcUse: "Used here for",
+    srcGroupLaw: "Government documents",
+    srcGroupData: "Open data",
+    srcGroupGap: "Not yet published",
+    srcGapLead: "The map deliberately leaves these blank. No document sets them out, so it does not guess.",
+    srcBadge: "Sources",
+    srcClose: "Close",
+    layers: "Data layers",
+    lezName: "Low-emission zone",
+    lezOn: "Show the nine wards that contain the low-emission zone",
+    chargeName: "EV charging",
+    chargeOn: "Show {n} charging points from OpenStreetMap",
+    lezTitle: "Low-emission zone",
+    lezWhen: "Pilot from 1 Jul 2026 to 31 Dec 2027",
+    lezWhere: "Inside Ring Road 1, across nine wards: Hai Bà Trưng, Cửa Nam, Hoàn Kiếm, Ô Chợ Dừa, Văn Miếu – Quốc Tử Giám, Ba Đình, Giảng Võ, Ngọc Hà, Tây Hồ.",
+    lezWarn: "The outline on the map is the WARD boundary, not the restricted area. The pilot covers only parts of it. Do not use this instead of the signs on the street.",
+    lezWhat: "Banned outright: fossil-fuel trucks over 3,500 kg; petrol motorbikes on ride-hailing apps; fossil-fuel cars below emission level 4. Time-restricted: petrol motorbikes and cars that miss the standard.",
+    lezHours: "Restricted hours: not yet published",
+    lezHoursWhy: "The resolution sets no hours; they await the city government's scheme. The map will show none until a document exists.",
+    lezNext: "Next milestones: 1 Jan 2028 out to Ring Roads 1–2, then Ring Road 3 from 2030.",
+    lezInZone: "In a low-emission-zone ward",
+    chargeTitle: "EV charging points",
+    chargeCount: "{n} points inside the Hanoi frame, {v} of them VinFast.",
+    chargeWarn: "OpenStreetMap is community-mapped, so it can be incomplete or stale, and almost none of these record whether they take electric motorbikes. Call ahead before a long trip.",
+    srcSee: "Read the document",
+  },
+};
+
+function t(key, vars) {
+  let out = STRINGS[LANG]?.[key] ?? STRINGS.vi[key] ?? key;
+  if (vars) for (const [k, v] of Object.entries(vars)) out = out.replaceAll(`{${k}}`, v);
+  return out;
+}
+
+// Dữ liệu song ngữ được viết là "Tiếng Việt. · English." — tách theo dấu " · ".
+// Chuỗi không có dấu tách (ví dụ địa điểm mới từ Sheet) thì giữ nguyên.
+function bi(text) {
+  if (!text) return "";
+  const at = text.indexOf(" · ");
+  if (at < 0) return text;
+  return LANG === "vi" ? text.slice(0, at) : text.slice(at + 3);
+}
+
+const AREA_EN = {
+  all: ["All of Hanoi", "Whole city"],
+  "pho-co": ["Old Quarter & Hoàn Kiếm", "Old Quarter"],
+  phap: ["French Quarter", "French Quarter"],
+  "ba-dinh": ["Ba Đình & Temple of Literature", "Ba Đình"],
+  "ho-tay": ["West Lake", "West Lake"],
+  "tay-moi": ["Cầu Giấy & Mỹ Đình", "New West"],
+  nam: ["South Hanoi", "South"],
+  "song-hong": ["Red River & Long Biên", "Red River"],
+};
+
+function areaLabel(area) {
+  return LANG === "en" ? (AREA_EN[area.id]?.[0] ?? area.label) : area.label;
+}
+
+function areaShort(area) {
+  if (!area) return "";
+  return LANG === "en" ? (AREA_EN[area.id]?.[1] ?? area.shortLabel) : area.shortLabel;
+}
+
+const STAGE_KEY = { "Ẩm thực": "Food", "Du lịch": "Sights", BĐS: "Homes" };
+
+function stageLabel(stage) {
+  const key = STAGE_KEY[stage];
+  return key ? t(`stage${key}`) : stage || "";
+}
+
+function tagOf(stage) {
+  const key = STAGE_KEY[stage];
+  return key ? t(`tag${key}`) : "";
+}
+
+function setLang(next) {
+  if (next === LANG) return;
+  LANG = next;
+  try {
+    localStorage.setItem(LANG_KEY, next);
+  } catch {
+    /* bỏ qua */
+  }
+  applyLanguage();
+}
+
+// Vẽ lại mọi chữ trên màn hình theo ngôn ngữ đang chọn.
+function applyLanguage({ silent = false } = {}) {
+  const n = STARTUPS.length;
+  document.documentElement.lang = LANG;
+  document.title = t("title");
+
+  const setText = (selector, value) => {
+    const el = document.querySelector(selector);
+    if (el) el.textContent = value;
+  };
+  const setHtml = (selector, value) => {
+    const el = document.querySelector(selector);
+    if (el) el.innerHTML = value;
+  };
+
+  setText(".brand__sub", t("brandSub", { n }));
+  setText(".search-trigger__label", t("search"));
+  setHtml(".rail__hint", t("hint"));
+  setHtml(".rail__credit", t("credit"));
+  setText(".rail__cta span:not(.rail__cta-arrow)", t("suggest"));
+  const cta = document.querySelector(".rail__cta");
+  if (cta) cta.href = suggestUrl();
+  if (searchInput) {
+    searchInput.placeholder = t("searchPlaceholder", { n });
+    searchInput.setAttribute("aria-label", t("searchAria"));
+  }
+  const trigger = document.querySelector("#searchTrigger");
+  if (trigger) trigger.setAttribute("aria-label", t("searchAria"));
+
+  const langBtn = document.querySelector("#langToggle");
+  if (langBtn) {
+    langBtn.textContent = LANG === "vi" ? "EN" : "VI";
+    langBtn.title = t("langSwitch");
+    langBtn.setAttribute("aria-label", t("langSwitch"));
+  }
+  const nearBtn = document.querySelector("#nearMe");
+  if (nearBtn) {
+    nearBtn.title = t("nearTitle");
+    nearBtn.setAttribute("aria-label", t("near"));
+    const label = nearBtn.querySelector(".tool-btn__label");
+    if (label) label.textContent = t("near");
+  }
+  // Nút lật 3D ⇄ bản đồ thật đổi cả chữ lẫn nghĩa theo chế độ đang xem.
+  const modeBtn = document.querySelector("#mapMode");
+  if (modeBtn) {
+    const label = mapMode ? t("map3d") : t("mapReal");
+    modeBtn.title = mapMode ? t("map3dTitle") : t("mapRealTitle");
+    modeBtn.setAttribute("aria-label", label);
+    modeBtn.setAttribute("aria-pressed", String(mapMode));
+    const span = modeBtn.querySelector(".tool-btn__label");
+    if (span) span.textContent = label;
+  }
+
+  if (silent) return;
+
+  applyMapLanguage();
+  renderMapPinNames();
+  renderMapLayerChips();
+  renderMapNote();
+
+  // Phần động: chỉ vẽ lại khi scene đã dựng xong.
+  if (areaList?.children.length) renderAreaList();
+  if (pinLegend?.children.length) renderPinLegend();
+  labelElements.forEach((el, id) => {
+    const small = el.querySelector("small[data-tag]");
+    const place = STARTUPS.find((s) => s.id === id);
+    if (small && place) small.textContent = tagOf(place.stage);
+  });
+  if (lastEnv) renderLiveBadge(lastEnv);
+  const selected = state.selectedId ? STARTUPS.find((s) => s.id === state.selectedId) : null;
+  if (selected) renderStartupDetail(selected);
+  else renderAreaDetail();
+  if (searchModal?.open) renderSearchResults(searchInput.value);
+  updateUiState();
+}
+
+/* ---------- 2) Lọc theo nhóm ---------- */
+
+const activeStages = new Set();
+
+function stageAllowed(item) {
+  return activeStages.size === 0 || activeStages.has(item?.stage);
+}
+
+function visibleItems(areaId) {
+  return areaItems(areaId).filter(stageAllowed);
+}
+
+const STAGE_SLUG = { "Ẩm thực": "an", "Du lịch": "choi", BĐS: "o" };
+const SLUG_STAGE = Object.fromEntries(Object.entries(STAGE_SLUG).map(([k, v]) => [v, k]));
+
+function toggleStage(stage) {
+  if (activeStages.has(stage)) activeStages.delete(stage);
+  else activeStages.add(stage);
+  // Bật cả ba nhóm cũng đồng nghĩa với "xem tất cả".
+  if (activeStages.size === 3) activeStages.clear();
+  renderPinLegend();
+  renderAreaList();
+  updateUiState();
+  syncFilterUrl();
+}
+
+function syncFilterUrl() {
+  const params = new URLSearchParams(location.search);
+  const slugs = [...activeStages].map((s) => STAGE_SLUG[s]).filter(Boolean);
+  if (slugs.length) params.set("nhom", slugs.join(","));
+  else params.delete("nhom");
+  const query = params.toString();
+  history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
+}
+
+function readFilterFromUrl() {
+  const raw = QUERY.get("nhom") || QUERY.get("cat");
+  if (!raw) return;
+  raw
+    .split(",")
+    .map((s) => SLUG_STAGE[normKey(s)] || (STAGE_KEY[s] ? s : null))
+    .filter(Boolean)
+    .forEach((stage) => activeStages.add(stage));
+  if (activeStages.size === 3) activeStages.clear();
+  if (activeStages.size) {
+    renderPinLegend();
+    renderAreaList();
+    updateUiState();
+  }
+}
+
+/* ---------- 3) Gần tôi · khoảng cách · chỉ đường ---------- */
+
+// Google Form nhận đề xuất địa điểm (đổ thẳng vào Sheet). Để trống thì nút
+// "Đề xuất địa điểm" quay về gửi email như cũ.
+const SUGGEST_FORM_URL = "";
+
+function suggestUrl() {
+  const form = (QUERY.get("form") || SUGGEST_FORM_URL || "").trim();
+  if (form) return form;
+  return `mailto:thaohienhomes@gmail.com?subject=${encodeURIComponent("Đề xuất địa điểm cho Hà Nội Atlas")}`;
+}
+
+let userPos = null;
+
+/* ---------- Toạ độ thật ngoài thực địa ---------- */
+
+// lat/lng trong data.js là toạ độ VẼ: chúng đặt pin đúng chỗ trên thành phố 3D
+// vẽ tay, nhưng so với thực địa có thể lệch cả cây số. Bảng dưới là toạ độ THẬT,
+// dò từ OpenStreetMap (Nominatim) với gợi ý tên riêng cho từng nơi rồi lọc bằng
+// ngưỡng 900 m: 45/52 điểm khớp, sai lệch trung bình 192 m. Dùng để đo khoảng
+// cách "Gần tôi" và để cắm pin trên chế độ bản đồ đường phố thật. 7 điểm còn
+// lại OSM chưa có hoặc trùng tên nên vẫn dùng toạ độ vẽ.
+const REAL_COORDS = {
+  "pho-bat-dan": [21.03364, 105.84638],
+  "pho-10-ly-quoc-su": [21.03047, 105.84885],
+  "pho-thin-lo-duc": [21.01704, 105.856],
+  "bun-cha-huong-lien": [21.01805, 105.85388],
+  "bun-cha-dac-kim": [21.03232, 105.84807],
+  "cha-ca-la-vong": [21.03568, 105.84915],
+  "ca-phe-giang": [21.03427, 105.8545],
+  "ca-phe-dinh": [21.032, 105.85239],
+  "cong-ca-phe": [21.02881, 105.84965],
+  "bia-ta-hien": [21.0353, 105.85199],
+  "banh-mi-25": [21.03617, 105.84872],
+  "xoi-yen": [21.03377, 105.85454],
+  "pho-cuon-ngu-xa": [21.04598, 105.84106],
+  "banh-tom-ho-tay": [21.04732, 105.83763],
+  "quan-an-ngon": [21.02626, 105.84342],
+  "ho-guom": [21.02883, 105.85254],
+  "den-ngoc-son": [21.03073, 105.85238],
+  "cho-dong-xuan": [21.0381, 105.8494],
+  "o-quan-chuong": [21.03733, 105.85221],
+  "nha-tho-lon": [21.02831, 105.85008],
+  "nha-hat-lon": [21.02414, 105.85976],
+  "hoa-lo": [21.02542, 105.84651],
+  "bao-tang-phu-nu": [21.02335, 105.8516],
+  "lang-bac": [21.03678, 105.83469],
+  "chua-mot-cot": [21.03586, 105.83361],
+  "hoang-thanh": [21.03839, 105.84062],
+  "cot-co": [21.03259, 105.83982],
+  "van-mieu": [21.02945, 105.83673],
+  "chua-tran-quoc": [21.04783, 105.83673],
+  "duong-thanh-nien": [21.04693, 105.8367],
+  "cau-long-bien": [21.04307, 105.85803],
+  "cv-thong-nhat": [21.01233, 105.84379],
+  "svd-my-dinh": [21.0205, 105.76393],
+  "bao-tang-dan-toc-hoc": [21.04008, 105.79884],
+  "bao-tang-ha-noi": [21.01001, 105.78631],
+  "vin-metropolis": [21.0315, 105.81507],
+  "lotte-center": [21.03227, 105.81263],
+  "keangnam-l72": [21.01735, 105.78359],
+  "vin-skylake": [21.02002, 105.78191],
+  "sunshine-city": [21.08345, 105.81122],
+  "dle-roi-soleil": [21.06535, 105.82703],
+  "sun-thuy-khue": [21.04078, 105.82598],
+  "vin-times-city": [20.99779, 105.86823],
+  "vin-royal-city": [21.00217, 105.81549],
+  "mipec-riverside": [21.04588, 105.86617],
+};
+
+function realPos(item) {
+  const found = item?.id ? REAL_COORDS[item.id] : null;
+  return found ? { lat: found[0], lng: found[1] } : item;
+}
+
+function hasRealPos(item) {
+  return Boolean(item?.id && REAL_COORDS[item.id]);
+}
+
+function metresBetween(rawA, rawB) {
+  const a = realPos(rawA);
+  const b = realPos(rawB);
+  const R = 6371000;
+  const toRad = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * toRad;
+  const dLng = (b.lng - a.lng) * toRad;
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(a.lat * toRad) * Math.cos(b.lat * toRad) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
+}
+
+function fmtDistance(m) {
+  if (m < 950) return `${Math.max(10, Math.round(m / 10) * 10)} m`;
+  if (m < 9500) return `${(m / 1000).toFixed(1)} km`;
+  return `${Math.round(m / 1000)} km`;
+}
+
+function distanceTo(item) {
+  if (!userPos || !item) return "";
+  return fmtDistance(metresBetween(userPos, item));
+}
+
+// Chỉ đường mở thẳng Google Maps. Toạ độ trên bản đồ này là vị trí cách điệu,
+// nên điểm đến gửi đi bằng TÊN + địa chỉ để Google tự tìm đúng chỗ thật.
+function directionsUrl(startup) {
+  const destination = [startup.name, startup.address, "Hà Nội"].filter(Boolean).join(", ");
+  const params = new URLSearchParams({ api: "1", destination });
+  if (userPos) params.set("origin", `${userPos.lat.toFixed(5)},${userPos.lng.toFixed(5)}`);
+  return `https://www.google.com/maps/dir/?${params.toString()}`;
+}
+
+let hereGroup = null;
+
+function buildHereMarker() {
+  hereGroup = new THREE.Group();
+  hereGroup.visible = false;
+
+  const dot = new THREE.Mesh(
+    new THREE.SphereGeometry(0.22, 16, 12),
+    new THREE.MeshBasicMaterial({ color: 0x2f9bff, fog: false }),
+  );
+  dot.position.y = 0.5;
+  hereGroup.add(dot);
+
+  const beam = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.05, 0.05, 1, 8),
+    new THREE.MeshBasicMaterial({ color: 0x2f9bff, transparent: true, opacity: 0.55, fog: false }),
+  );
+  beam.position.y = 0.5;
+  hereGroup.add(beam);
+
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.34, 0.46, 32),
+    new THREE.MeshBasicMaterial({
+      color: 0x2f9bff,
+      transparent: true,
+      opacity: 0.75,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      fog: false,
+    }),
+  );
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.y = 0.06;
+  ring.name = "pulse";
+  hereGroup.add(ring);
+
+  hereGroup.renderOrder = 7;
+  scene.add(hereGroup);
+}
+
+function updateHere(elapsed) {
+  if (!hereGroup?.visible) return;
+  const ring = hereGroup.getObjectByName("pulse");
+  if (!ring) return;
+  const beat = (elapsed % 1.8) / 1.8;
+  ring.scale.setScalar(1 + beat * 2.4);
+  ring.material.opacity = 0.75 * (1 - beat);
+}
+
+const HANOI_BBOX = { lat: [20.9, 21.16], lng: [105.68, 106.03] };
+
+function insideHanoi(pos) {
+  return (
+    pos.lat >= HANOI_BBOX.lat[0] &&
+    pos.lat <= HANOI_BBOX.lat[1] &&
+    pos.lng >= HANOI_BBOX.lng[0] &&
+    pos.lng <= HANOI_BBOX.lng[1]
+  );
+}
+
+function locateMe() {
+  const button = document.querySelector("#nearMe");
+  if (!navigator.geolocation) {
+    toast(t("locateFail"));
+    return;
+  }
+  button?.classList.add("is-busy");
+  toast(t("locating"), 2500);
+  navigator.geolocation.getCurrentPosition(
+    (position) => {
+      button?.classList.remove("is-busy");
+      userPos = { lat: position.coords.latitude, lng: position.coords.longitude };
+      button?.classList.add("is-on");
+
+      syncMapHere();
+      const onMap = insideHanoi(userPos);
+      if (onMap && hereGroup) {
+        hereGroup.position.copy(project(userPos.lat, userPos.lng, 0));
+        hereGroup.visible = true;
+      }
+
+      const nearest = [...STARTUPS]
+        .filter(stageAllowed)
+        .map((s) => ({ s, d: metresBetween(userPos, s) }))
+        .sort((a, b) => a.d - b.d)[0];
+      if (!nearest) return;
+
+      if (!onMap) toast(t("outsideHanoi"), 5200);
+      else toast(t("foundNear", { name: nearest.s.name, d: fmtDistance(nearest.d) }), 5200);
+      selectStartup(nearest.s.id);
+    },
+    (error) => {
+      button?.classList.remove("is-busy");
+      toast(error?.code === 1 ? t("locateDenied") : t("locateFail"), 5200);
+    },
+    { enableHighAccuracy: true, timeout: 12000, maximumAge: 120000 },
+  );
+}
+
+let toastEl = null;
+let toastTimer = null;
+
+function toast(message, ms = 3600) {
+  if (!toastEl) {
+    toastEl = document.createElement("div");
+    toastEl.className = "atlas-toast";
+    toastEl.setAttribute("role", "status");
+    document.body.appendChild(toastEl);
+  }
+  toastEl.textContent = message;
+  toastEl.classList.add("is-on");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove("is-on"), ms);
+}
+
+// Giờ mở cửa (cột "Giờ mở" trong Sheet) so với giờ Hà Nội thật.
+// Hiểu được "6:00–10:00 & 18:00–20:30", "8h–17h", "17:00-23:30"…
+function hanoiMinutes() {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Bangkok",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const hour = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
+  const minute = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
+  return hour * 60 + minute;
+}
+
+function openState(hours) {
+  if (!hours) return null;
+  const ranges = [...String(hours).matchAll(/(\d{1,2})\s*[:h]\s*(\d{2})?\s*[–\-—~]\s*(\d{1,2})\s*[:h]\s*(\d{2})?/g)].map(
+    (m) => [Number(m[1]) * 60 + Number(m[2] ?? 0), Number(m[3]) * 60 + Number(m[4] ?? 0)],
+  );
+  if (!ranges.length) return null;
+  const now = hanoiMinutes();
+  const hhmm = (v) => `${String(Math.floor((v % 1440) / 60)).padStart(2, "0")}:${String(v % 60).padStart(2, "0")}`;
+
+  for (const [from, to] of ranges) {
+    const end = to <= from ? to + 1440 : to; // quán mở qua nửa đêm
+    const at = now < from ? now + 1440 : now;
+    if (at >= from && at < end) return { open: true, text: t("openUntil", { t: hhmm(to) }) };
+  }
+  const next = ranges.map(([from]) => from).sort((a, b) => ((a - now + 1440) % 1440) - ((b - now + 1440) % 1440))[0];
+  return { open: false, text: t("opensAt", { t: hhmm(next) }) };
+}
+
+/* ---------- 4) Đèn đêm: đèn đường, đèn nhà, đèn cầu ---------- */
+
+let nightLights = null;
+
+function makeGlowTexture() {
+  const c = document.createElement("canvas");
+  c.width = 64;
+  c.height = 64;
+  const ctx = c.getContext("2d");
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, "rgba(255,255,255,1)");
+  g.addColorStop(0.25, "rgba(255,244,214,0.75)");
+  g.addColorStop(0.6, "rgba(255,236,190,0.22)");
+  g.addColorStop(1, "rgba(255,232,180,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// Rải điểm đều dọc một tuyến đường (toạ độ lat/lng) theo bước tính bằng world unit.
+function walkPath(path, step) {
+  const points = path.map(([lat, lng]) => project(lat, lng, 0));
+  const out = [];
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const a = points[i];
+    const b = points[i + 1];
+    const span = a.distanceTo(b);
+    const times = Math.max(1, Math.round(span / step));
+    for (let k = 0; k < times; k += 1) {
+      const p = a.clone().lerp(b, k / times);
+      const dir = b.clone().sub(a).normalize();
+      out.push({ p, dir });
+    }
+  }
+  return out;
+}
+
+function makeLightCloud(positions, colors, coreSize, haloSize, haloOpacity, glow) {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  // Hai lớp dùng chung một hình học: lõi sáng đanh + quầng sáng toả ra.
+  // Tắt fog cho đèn: ánh đèn thành phố vẫn xuyên qua sương, đúng như thật.
+  const make = (size, opacity) =>
+    new THREE.Points(
+      geometry,
+      new THREE.PointsMaterial({
+        size,
+        map: glow,
+        vertexColors: true,
+        transparent: true,
+        opacity,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        fog: false,
+      }),
+    );
+  const core = make(coreSize, 1);
+  const halo = make(haloSize, haloOpacity);
+  return { core, halo };
+}
+
+function buildNightLights() {
+  const lamp = { pos: [], col: [] };
+  const home = { pos: [], col: [] };
+  const post = [];
+  const warm = new THREE.Color(0xffc978);
+  const bridgeLight = new THREE.Color(0xffe0a4);
+  const metroLight = new THREE.Color(0xd6ecff);
+  const window1 = new THREE.Color(0xffcf90);
+  const window2 = new THREE.Color(0xa9c8f0);
+  const random = seededRandom(9931);
+
+  const add = (bag, x, y, z, color) => {
+    bag.pos.push(x, y, z);
+    bag.col.push(color.r, color.g, color.b);
+  };
+
+  // Đèn cao áp hai bên các đại lộ — dày để đường thành vệt sáng liền.
+  for (const road of BOULEVARDS) {
+    for (const { p, dir } of walkPath(road.path, 0.5)) {
+      const side = new THREE.Vector3(-dir.z, 0, dir.x).multiplyScalar(0.22);
+      for (const sign of [1, -1]) {
+        const x = p.x + side.x * sign;
+        const z = p.z + side.z * sign;
+        add(lamp, x, 0.62, z, warm);
+        post.push(x, 0.31, z);
+      }
+    }
+  }
+
+  // Dây đèn dọc bốn cây cầu.
+  for (const span of BRIDGES) {
+    for (const { p } of walkPath(span.deck, 0.42)) add(lamp, p.x, 1.1, p.z, bridgeLight);
+  }
+
+  // Metro trên cao sáng đèn nhà ga và dải ray.
+  for (const line of METRO_LINES) {
+    if (line.mode !== "viaduct") continue;
+    for (const { p } of walkPath(line.stops, 0.75)) add(lamp, p.x, 0.78, p.z, metroLight);
+  }
+
+  // Đèn cửa sổ nhà dân: rải trong từng quận, tránh hồ, sông, công viên.
+  for (const district of DISTRICTS) {
+    const [latMin, latMax, lngMin, lngMax] = district.bbox;
+    const area = (latMax - latMin) * (lngMax - lngMin) * 1e6;
+    // Bờ bên kia sông thưa đèn hơn, đúng như nhìn từ trung tâm.
+    const wanted = Math.min(300, Math.round(area * (district.faded ? 0.6 : 2.2)));
+    let tries = 0;
+    let made = 0;
+    while (made < wanted && tries < wanted * 6) {
+      tries += 1;
+      const lat = latMin + random() * (latMax - latMin);
+      const lng = lngMin + random() * (lngMax - lngMin);
+      if (!buildingAllowed(lat, lng)) continue;
+      const p = project(lat, lng, 0);
+      const top = district.h?.[1] ?? 0.7;
+      const y = 0.22 + random() * Math.max(0.3, top * 0.85);
+      add(home, p.x, y, p.z, random() < 0.85 ? window1 : window2);
+      made += 1;
+    }
+  }
+
+  // Vài điểm nhấn: Tháp Rùa, Lăng Bác, Nhà thờ Lớn, đèn báo không trên tháp cao.
+  const accents = [
+    [21.0285, 105.8525, 1.1, 0xfff0c4],
+    [21.0368, 105.8348, 1.3, 0xfff6dd],
+    [21.0289, 105.849, 1.6, 0xffe9bb],
+    [21.0172, 105.7838, 3.4, 0xff6b5a],
+    [21.0313, 105.8135, 2.9, 0xff6b5a],
+    [21.0798, 105.8175, 2.6, 0xffd28a],
+  ];
+  for (const [lat, lng, y, hex] of accents) {
+    const p = project(lat, lng, 0);
+    add(lamp, p.x, y, p.z, new THREE.Color(hex));
+  }
+
+  const glow = makeGlowTexture();
+  const lamps = makeLightCloud(lamp.pos, lamp.col, 0.26, 1.45, 0.34, glow);
+  const homes = makeLightCloud(home.pos, home.col, 0.15, 0.5, 0.24, glow);
+
+  // Cột đèn: một InstancedMesh mảnh cho toàn bộ đại lộ.
+  const count = post.length / 3;
+  const poles = new THREE.InstancedMesh(
+    new THREE.CylinderGeometry(0.022, 0.03, 0.62, 5),
+    new THREE.MeshStandardMaterial({ color: 0x2a2f37, roughness: 0.8, metalness: 0.2 }),
+    count,
+  );
+  const matrix = new THREE.Matrix4();
+  for (let i = 0; i < count; i += 1) {
+    matrix.makeTranslation(post[i * 3], post[i * 3 + 1], post[i * 3 + 2]);
+    poles.setMatrixAt(i, matrix);
+  }
+  poles.instanceMatrix.needsUpdate = true;
+  poles.castShadow = false;
+
+  const group = new THREE.Group();
+  group.add(poles, homes.halo, homes.core, lamps.halo, lamps.core);
+  group.visible = false;
+  group.renderOrder = 5;
+  scene.add(group);
+  nightLights = { group, lamps, homes, poles };
+}
+
+function setNightLights(on) {
+  if (on && !nightLights) buildNightLights();
+  if (nightLights) nightLights.group.visible = Boolean(on);
+}
+
+function updateNightLights(elapsed) {
+  if (!nightLights?.group.visible) return;
+  // Nhấp nháy rất nhẹ để đèn không chết cứng như hình dán.
+  const flicker = 0.94 + Math.sin(elapsed * 1.7) * 0.04 + Math.sin(elapsed * 4.3) * 0.02;
+  nightLights.lamps.core.material.opacity = flicker;
+  nightLights.lamps.halo.material.opacity = 0.34 * flicker;
+  nightLights.homes.core.material.opacity = 0.92 * flicker;
+  nightLights.homes.halo.material.opacity = 0.24 * flicker;
+}
+
+/* ---------- 5) Khung hình theo tỉ lệ màn hình ---------- */
+
+// Máy tính nằm ngang thấy rộng, điện thoại dựng dọc thấy rất hẹp. Cùng một
+// khoảng cách camera sẽ cắt cụt thành phố trên điện thoại, nên mọi cú bay
+// được kéo lùi lại theo tỉ lệ màn hình — và sương mù mỏng đi tương ứng.
+const viewFit = { pull: 1, tilt: 0, fog: 1 };
+let wideFocus = null;
+
+function measureViewFit() {
+  const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+  const pull = Math.min(1.18, Math.max(1, (1.55 / Math.max(0.35, aspect)) ** 0.35));
+  viewFit.pull = pull;
+  viewFit.tilt = (pull - 1) * 1.55; // radian: màn hình càng dọc càng nhìn từ trên xuống
+  viewFit.fog = pull ** -0.4;
+  controls.maxDistance = 140 * pull;
+
+  // Toàn cảnh trên máy tính lấy trọn cả rìa tây; trên điện thoại dọc thì kéo
+  // tâm về lõi Hồ Tây – Phố cổ, chỗ đáng nhìn nhất.
+  const all = AREA_BY_ID.all?.focus;
+  if (!all) return;
+  if (!wideFocus) wideFocus = { lat: all.lat, lng: all.lng };
+  const toCore = pull > 1.04 ? 1 : 0;
+  all.lat = wideFocus.lat + (21.0335 - wideFocus.lat) * toCore;
+  all.lng = wideFocus.lng + (105.8365 - wideFocus.lng) * toCore;
+}
+
+/* ---------- Thanh công cụ trên HUD ---------- */
+
+function mountToolbar() {
+  const host = document.querySelector(".hud-top-right");
+  if (!host || document.querySelector("#langToggle")) return;
+  const anchor = document.querySelector("#searchTrigger");
+
+  const lang = document.createElement("button");
+  lang.id = "langToggle";
+  lang.type = "button";
+  lang.className = "tool-btn tool-btn--lang";
+  lang.addEventListener("click", () => setLang(LANG === "vi" ? "en" : "vi"));
+
+  const near = document.createElement("button");
+  near.id = "nearMe";
+  near.type = "button";
+  near.className = "tool-btn";
+  near.innerHTML =
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" d="M12 2v3m0 14v3M2 12h3m14 0h3"/><circle cx="12" cy="12" r="6" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="2.2" fill="currentColor"/></svg><span class="tool-btn__label"></span>';
+  near.addEventListener("click", locateMe);
+
+  const mode = document.createElement("button");
+  mode.id = "mapMode";
+  mode.type = "button";
+  mode.className = "tool-btn";
+  mode.innerHTML =
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" d="M9 3.6 3.5 5.8v14.6L9 18.2l6 2.2 5.5-2.2V3.6L15 5.8 9 3.6Z"/><path fill="none" stroke="currentColor" stroke-width="1.9" d="M9 3.6v14.6M15 5.8v14.6"/></svg><span class="tool-btn__label"></span>';
+  mode.addEventListener("click", () => setMapMode(!mapMode));
+
+  host.insertBefore(lang, anchor);
+  host.insertBefore(near, anchor);
+  host.insertBefore(mode, anchor);
+  applyLanguage({ silent: true });
+}
+
+/* ==========================================================================
+   CHẾ ĐỘ BẢN ĐỒ ĐƯỜNG PHỐ THẬT · REAL STREET MAP
+   Thành phố 3D là bản vẽ tay — đẹp để nhìn tổng thể, nhưng không đi theo được.
+   Nút "Bản đồ thật" lật sang nền OpenStreetMap qua OpenFreeMap (miễn phí,
+   không cần API key, không giới hạn lượt gọi, dùng thương mại được) và cắm 52
+   pin bằng toạ độ thực địa, đủ chi tiết để dò từng ngõ. Thư viện MapLibre chỉ
+   tải xuống khi bấm nút, nên ai không dùng thì không phải tải thêm gì.
+   Nền này cũng là chỗ để chồng các lớp dữ liệu thật sắp tới: vùng phát thải
+   thấp, trạm sạc, ranh giới phường mới sau sáp nhập.
+   Mở thẳng bằng ?che-do=ban-do · phím tắt M.
+   ========================================================================== */
+
+// Ba nền có sẵn của OpenFreeMap; đổi bằng ?nen=duong|sang|dam, hoặc dán thẳng
+// link style JSON khác vào ?nen= nếu muốn thử nền riêng.
+const MAP_STYLES = {
+  duong: "https://tiles.openfreemap.org/styles/liberty",
+  sang: "https://tiles.openfreemap.org/styles/bright",
+  dam: "https://tiles.openfreemap.org/styles/positron",
+};
+
+function mapStyleUrl() {
+  const asked = (QUERY.get("nen") || "").trim();
+  if (/^https?:\/\//i.test(asked)) return asked;
+  return MAP_STYLES[asked.toLowerCase()] || MAP_STYLES.duong;
+}
+
+const MAP_HOME = { lng: 105.8412, lat: 21.0293, zoom: 11.4 };
+const MAP_LIMIT = [
+  [104.8, 19.9],
+  [107.2, 22.1],
+];
+
+let mapMode = false;
+let mapLib = null;
+let mapObj = null;
+let mapHost = null;
+let mapBooting = null;
+let mapHere = null;
+let mapLastError = "";
+const mapMarkers = new Map();
+
+function isPhone() {
+  return window.matchMedia("(max-width: 54rem)").matches;
+}
+
+// Chừa chỗ cho thanh điều hướng bên trái (máy tính) hoặc dải chip dưới đáy
+// (điện thoại), để điểm được chọn không nằm khuất sau HUD.
+function mapPadding() {
+  if (isPhone()) return { top: 76, right: 24, bottom: 200, left: 24 };
+  return { top: 96, right: 96, bottom: 64, left: 392 };
+}
+
+function ensureMapHost() {
+  if (mapHost) return mapHost;
+  mapHost = document.createElement("div");
+  mapHost.id = "realMap";
+  mapHost.className = "real-map";
+  mapHost.setAttribute("aria-hidden", "true");
+  const shell = document.querySelector("#app");
+  shell?.insertBefore(mapHost, document.querySelector("#labelsLayer"));
+  return mapHost;
+}
+
+async function loadMap() {
+  if (mapObj) return mapObj;
+  if (mapBooting) return mapBooting;
+  mapBooting = (async () => {
+    // Tải trễ: gói MapLibre nằm ở chunk riêng, chỉ về máy khi thật sự cần.
+    const [mod] = await Promise.all([import("maplibre-gl"), import("maplibre-gl/dist/maplibre-gl.css")]);
+    // v5 xuất default, v6 xuất theo tên — nhận cả hai.
+    const lib = mod?.Map ? mod : mod.default;
+    mapLib = lib;
+    const host = ensureMapHost();
+    const phone = isPhone();
+    const map = new lib.Map({
+      container: host,
+      style: mapStyleUrl(),
+      center: [MAP_HOME.lng, MAP_HOME.lat],
+      zoom: MAP_HOME.zoom,
+      minZoom: 9,
+      maxZoom: 19,
+      maxBounds: MAP_LIMIT,
+      attributionControl: { compact: true },
+      hash: false,
+    });
+
+    const corner = phone ? "top-left" : "bottom-right";
+    if (!phone) map.addControl(new lib.NavigationControl({ visualizePitch: true }), corner);
+    const geo = new lib.GeolocateControl({
+      positionOptions: { enableHighAccuracy: true },
+      trackUserLocation: true,
+      showUserLocation: false, // đã có chấm "bạn ở đây" dùng chung với bản 3D
+    });
+    geo.on("geolocate", (event) => {
+      const coords = event?.coords;
+      if (!coords) return;
+      userPos = { lat: coords.latitude, lng: coords.longitude };
+      document.querySelector("#nearMe")?.classList.add("is-on");
+      syncMapHere();
+      const chosen = state.selectedId ? STARTUPS.find((s) => s.id === state.selectedId) : null;
+      if (chosen) renderStartupDetail(chosen);
+    });
+    map.addControl(geo, corner);
+    // Thước tỉ lệ: máy tính đặt cùng góc dưới phải, điện thoại đẩy xuống góc
+    // dưới trái cho khỏi chồng lên nút định vị.
+    map.addControl(new lib.ScaleControl({ maxWidth: 88, unit: "metric" }), phone ? "bottom-left" : corner);
+
+    // Giữ lỗi cuối của bản đồ để còn dò được khi có máy báo "bản đồ trắng".
+    map.on("error", (event) => {
+      mapLastError = String(event?.error?.message || event?.error || event || "").slice(0, 240);
+    });
+    map.on("click", () => clearSelection());
+    map.on("zoom", syncMapZoom);
+    // Style có thể nạp lại (đổi nền, mất mạng rồi vào lại) — mỗi lần xong thì
+    // đặt lại ngôn ngữ nhãn cho khớp nút VI | EN.
+    map.on("style.load", () => {
+      applyMapLanguage();
+      syncMapLayers();
+    });
+
+    // Chỉ chờ style JSON, không chờ vẽ xong: mạng yếu thì bản đồ hiện ra trước
+    // rồi tự đổ ảnh vào sau, nút bấm không bao giờ treo.
+    await new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        resolve();
+      };
+      if (map.isStyleLoaded()) {
+        finish();
+        return;
+      }
+      map.once("style.load", finish);
+      map.once("load", finish);
+      setTimeout(finish, 9000);
+    });
+
+    mapObj = map;
+    applyMapLanguage();
+    buildMapMarkers();
+    syncMapZoom();
+    syncMapHere();
+    return map;
+  })();
+
+  try {
+    return await mapBooting;
+  } catch (error) {
+    mapBooting = null; // cho phép bấm lại sau khi có mạng
+    throw error;
+  }
+}
+
+/* ---------- Pin trên nền bản đồ thật ---------- */
+
+function buildMapMarkers() {
+  mapMarkers.forEach((marker) => marker.remove());
+  mapMarkers.clear();
+  if (!mapObj || !mapLib) return;
+
+  STARTUPS.forEach((item) => {
+    const pos = realPos(item);
+    const el = document.createElement("button");
+    el.type = "button";
+    el.className = `map-pin map-pin--${STAGE_SLUG[item.stage] || "an"}`;
+    el.dataset.id = item.id;
+    el.dataset.stage = item.stage;
+    if (!hasRealPos(item)) el.classList.add("is-approx");
+    el.innerHTML =
+      `<span class="map-pin__dot"><img class="map-pin__logo" src="${logoPath(item)}" alt="" ` +
+      `data-stage="${escapeHtml(item.stage)}" /></span><span class="map-pin__name"></span>`;
+    el.addEventListener("click", (event) => {
+      event.stopPropagation();
+      selectStartup(item.id);
+    });
+    const marker = new mapLib.Marker({ element: el, anchor: "center" })
+      .setLngLat([pos.lng, pos.lat])
+      .addTo(mapObj);
+    mapMarkers.set(item.id, marker);
+  });
+
+  renderMapPinNames();
+  syncMapMarkers();
+}
+
+function renderMapPinNames() {
+  if (!mapObj) return;
+  mapMarkers.forEach((marker, id) => {
+    const item = STARTUPS.find((s) => s.id === id);
+    const el = marker.getElement();
+    const name = el.querySelector(".map-pin__name");
+    if (!item || !name) return;
+    name.textContent = item.name;
+    const note = hasRealPos(item) ? "" : ` — ${t("mapApprox")}`;
+    el.title = `${item.name} · ${stageLabel(item.stage)}${note}`;
+  });
+}
+
+// Bộ lọc Ăn / Chơi / Ở và điểm đang chọn dùng chung một trạng thái với bản 3D.
+function syncMapMarkers() {
+  if (!mapObj) return;
+  mapMarkers.forEach((marker, id) => {
+    const item = STARTUPS.find((s) => s.id === id);
+    const el = marker.getElement();
+    const on = Boolean(item) && stageAllowed(item);
+    el.classList.toggle("is-off", !on);
+    el.classList.toggle("is-active", on && state.selectedId === id);
+    el.tabIndex = on ? 0 : -1;
+  });
+}
+
+// Xa thì chỉ hiện chấm màu; đủ gần mới bung tên ra, tránh chữ chồng chữ.
+function syncMapZoom() {
+  if (!mapObj || !mapHost) return;
+  // Màn hình điện thoại hẹp nên phải phóng gần hơn mới bung tên, không thì
+  // chữ chồng lên nhau đọc không ra.
+  const from = isPhone() ? 15.2 : 13.4;
+  mapHost.classList.toggle("show-names", mapObj.getZoom() >= from);
+}
+
+function syncMapHere() {
+  if (!mapObj || !mapLib || !userPos) return;
+  if (!mapHere) {
+    const el = document.createElement("div");
+    el.className = "map-here";
+    el.title = t("youAreHere");
+    mapHere = new mapLib.Marker({ element: el }).setLngLat([userPos.lng, userPos.lat]).addTo(mapObj);
+    return;
+  }
+  mapHere.setLngLat([userPos.lng, userPos.lat]);
+}
+
+// Nhãn trên nền bản đồ đổi theo nút VI | EN. OpenStreetMap ghi tên tiếng Việt
+// ở trường `name`, khách nước ngoài thì lấy `name:en` rồi mới đến bản Latin.
+function applyMapLanguage() {
+  if (!mapObj?.isStyleLoaded?.()) return;
+  const field =
+    LANG === "en"
+      ? ["coalesce", ["get", "name:en"], ["get", "name:latin"], ["get", "name"]]
+      : ["coalesce", ["get", "name:vi"], ["get", "name"], ["get", "name:latin"]];
+  const layers = mapObj.getStyle()?.layers || [];
+  layers.forEach((layer) => {
+    if (layer.type !== "symbol" || !layer.layout || !("text-field" in layer.layout)) return;
+    try {
+      mapObj.setLayoutProperty(layer.id, "text-field", field);
+    } catch {
+      /* lớp nào không đổi được thì để nguyên, không chặn cả bản đồ */
+    }
+  });
+}
+
+/* ---------- Bay tới, dùng chung với camera 3D ---------- */
+
+function mapFocusPlace(item, { instant = false } = {}) {
+  if (!mapMode || !mapObj || !mapLib || !item) return;
+  const pos = realPos(item);
+  // Đóng khung một ô ~200 m quanh điểm rồi để fitBounds tự lo phần chừa chỗ
+  // cho HUD — như vậy khung hình không bao giờ rơi vào sau thanh bên.
+  const box = 0.0018;
+  const bounds = new mapLib.LngLatBounds(
+    [pos.lng - box, pos.lat - box],
+    [pos.lng + box, pos.lat + box],
+  );
+  mapObj.fitBounds(bounds, {
+    padding: mapPadding(),
+    maxZoom: 17,
+    duration: instant ? 0 : 900,
+  });
+}
+
+function mapFocusArea(areaId, { instant = false } = {}) {
+  if (!mapMode || !mapObj || !mapLib) return;
+  const items = visibleItems(areaId);
+  if (!items.length) return;
+  const bounds = new mapLib.LngLatBounds();
+  items.forEach((item) => {
+    const pos = realPos(item);
+    bounds.extend([pos.lng, pos.lat]);
+  });
+  const camera = mapObj.cameraForBounds(bounds, { padding: mapPadding(), maxZoom: 15.4 });
+  if (!camera) return;
+  // Vừa khít cả 52 điểm thì trên điện thoại phố xá bé như hạt vừng: ép một mức
+  // phóng tối thiểu để còn đọc được tên đường, ai muốn xem rộng cứ chụm tay ra.
+  const floor = isPhone() ? 12.1 : 11.6;
+  mapObj.easeTo({
+    center: camera.center,
+    zoom: Math.max(camera.zoom, floor),
+    duration: instant ? 0 : 1100,
+  });
+}
+
+/* ---------- Lật qua lại 3D ⇄ bản đồ thật ---------- */
+
+async function setMapMode(next, { silent = false } = {}) {
+  const want = Boolean(next);
+  if (want === mapMode) return;
+  const button = document.querySelector("#mapMode");
+
+  if (want) {
+    if (!mapObj) {
+      button?.classList.add("is-busy");
+      toast(t("mapLoading"), 8000);
+    }
+    try {
+      await loadMap();
+    } catch {
+      button?.classList.remove("is-busy");
+      toast(t("mapFail"), 5200);
+      return;
+    }
+    button?.classList.remove("is-busy");
+  }
+
+  mapMode = want;
+  document.body.classList.toggle("is-map", mapMode);
+  mapHost?.classList.toggle("is-on", mapMode);
+  mapHost?.setAttribute("aria-hidden", mapMode ? "false" : "true");
+  button?.classList.toggle("is-on", mapMode);
+  applyLanguage({ silent: true });
+  renderMapNote();
+
+  if (mapMode && mapObj) {
+    mapObj.resize();
+    syncMapMarkers();
+    syncMapHere();
+    syncMapLayers();
+    const chosen = state.selectedId ? STARTUPS.find((s) => s.id === state.selectedId) : null;
+    if (chosen) mapFocusPlace(chosen, { instant: true });
+    else mapFocusArea(state.activeAreaId, { instant: true });
+    if (!silent) toast(t("mapHint"), 4200);
+  }
+
+  syncModeUrl();
+}
+
+function syncModeUrl() {
+  const params = new URLSearchParams(location.search);
+  if (mapMode) params.set("che-do", "ban-do");
+  else params.delete("che-do");
+  const query = params.toString();
+  history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
+}
+
+function bootMapMode() {
+  const asked = (QUERY.get("che-do") || QUERY.get("mode") || "").toLowerCase();
+  if (asked === "ban-do" || asked === "map" || asked === "street") setMapMode(true, { silent: true });
+}
+
+// Phím M lật chế độ, trừ khi đang gõ trong ô tìm kiếm.
+window.addEventListener("keydown", (event) => {
+  if (event.key !== "m" && event.key !== "M") return;
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  const tag = event.target?.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || event.target?.isContentEditable) return;
+  if (searchModal?.open) return;
+  event.preventDefault();
+  setMapMode(!mapMode);
+});
+
+/* ==========================================================================
+   NGUỒN & ĐỐI CHIẾU · SOURCES AND CITATIONS
+   Nguyên tắc của dự án: bất kỳ điều gì bản đồ khẳng định mà dựa vào văn bản
+   nhà nước đều phải ghi rõ số hiệu, cơ quan ban hành, ngày ký, ngày hiệu lực
+   và kèm link mở thẳng văn bản gốc — người dân tự đọc, không phải tin lời
+   một cái app. Chỗ nào văn bản chưa quy định thì ghi thẳng "chưa công bố"
+   chứ không suy diễn: đi nhầm đường vì một khung giờ bịa ra là mất tiền thật.
+   Mọi lớp dữ liệu pháp lý thêm về sau bắt buộc khai `sources` ở đây.
+   Mở bằng #/nguon, chạm vào huy hiệu thời tiết, hoặc link ở chân thanh bên.
+   ========================================================================== */
+
+// Ngày gần nhất người làm ngồi mở lại từng văn bản để đối chiếu.
+const SOURCE_CHECKED = "2026-08-06";
+const SOURCE_STALE_DAYS = 180;
+
+const SOURCES = [
+  {
+    id: "luat-thu-do-2024",
+    group: "law",
+    kind: "Luật",
+    kindEn: "Law",
+    ref: "Luật Thủ đô số 39/2024/QH15",
+    title: "Luật Thủ đô — điểm a khoản 2 Điều 28 cho phép Hà Nội lập vùng phát thải thấp",
+    titleEn: "Law on the Capital — Article 28(2)(a) lets Hanoi create a low-emission zone",
+    body: "Quốc hội",
+    bodyEn: "National Assembly",
+    signed: "2024-06-28",
+    uses: "Căn cứ pháp lý gốc của vùng phát thải thấp; mọi lớp liên quan đều quy về đây.",
+    usesEn: "The root legal basis for the low-emission zone; every related layer traces back to it.",
+    note: "Link là bản hợp nhất 114/VBHN-VPQH do Văn phòng Quốc hội phát hành.",
+    noteEn: "The link is consolidated text 114/VBHN-VPQH issued by the National Assembly Office.",
+    url: "https://datafiles.chinhphu.vn/cpp/files/vbpq/2025/9/114-vbhn-vpqh.pdf",
+  },
+  {
+    id: "nq-57-2025",
+    group: "law",
+    kind: "Nghị quyết",
+    kindEn: "Resolution",
+    ref: "Nghị quyết 57/2025/NQ-HĐND",
+    title: "Quy định thực hiện vùng phát thải thấp trên địa bàn thành phố Hà Nội",
+    titleEn: "Rules for running the low-emission zone in Hanoi",
+    body: "HĐND thành phố Hà Nội · kỳ họp thứ 28",
+    bodyEn: "Hanoi People's Council · 28th session",
+    signed: "2025-11-26",
+    effective: "2025-12-10",
+    replaces: "Nghị quyết 47/2024/NQ-HĐND ngày 12/12/2024",
+    replacesEn: "Resolution 47/2024/NQ-HĐND of 12 Dec 2024",
+    uses: "Danh sách 9 phường và mốc thời gian của vùng phát thải thấp.",
+    usesEn: "The list of nine wards and the dates of the low-emission zone.",
+    note: "Giai đoạn 01/7/2026 – 31/12/2027 chỉ thí điểm một số khu vực trong Vành đai 1, thuộc 9 phường: Hai Bà Trưng, Cửa Nam, Hoàn Kiếm, Ô Chợ Dừa, Văn Miếu, Ba Đình, Giảng Võ, Ngọc Hà, Tây Hồ. Không phải cấm cả phường.",
+    noteEn: "From 1 Jul 2026 to 31 Dec 2027 the zone is a pilot inside parts of Ring Road 1, across nine wards: Hai Bà Trưng, Cửa Nam, Hoàn Kiếm, Ô Chợ Dừa, Văn Miếu, Ba Đình, Giảng Võ, Ngọc Hà, Tây Hồ. It is not a whole-ward ban.",
+    url: "https://vanban.hanoi.gov.vn/chi-tiet-van-ban/quy-dinh-thuc-hien-vung-phat-thai-thap-tren-dia-ban-thanh-pho-ha-noi-thuc-hien-diem-a-khoan-2-dieu--228371",
+  },
+  {
+    id: "ct-20-2025",
+    group: "law",
+    kind: "Chỉ thị",
+    kindEn: "Directive",
+    ref: "Chỉ thị 20/CT-TTg",
+    title: "Một số nhiệm vụ cấp bách, quyết liệt ngăn chặn, giải quyết tình trạng ô nhiễm môi trường",
+    titleEn: "Urgent tasks to halt and resolve environmental pollution",
+    body: "Thủ tướng Chính phủ · Phạm Minh Chính ký",
+    bodyEn: "Prime Minister · signed by Phạm Minh Chính",
+    signed: "2025-07-12",
+    uses: "Mốc 01/7/2026 với Vành đai 1, 01/01/2028 với Vành đai 1–2 và từ 2030 mở ra Vành đai 3.",
+    usesEn: "The 1 Jul 2026 Ring Road 1 milestone, 1 Jan 2028 for Ring Roads 1–2, and 2030 out to Ring Road 3.",
+    url: "https://vanban.chinhphu.vn/?docid=214542&pageid=27160",
+  },
+  {
+    id: "nq-1656-2025",
+    group: "law",
+    kind: "Nghị quyết",
+    kindEn: "Resolution",
+    ref: "Nghị quyết 1656/NQ-UBTVQH15",
+    title: "Sắp xếp các đơn vị hành chính cấp xã của thành phố Hà Nội năm 2025",
+    titleEn: "2025 rearrangement of Hanoi's commune-level administrative units",
+    body: "Ủy ban Thường vụ Quốc hội · Trần Thanh Mẫn ký",
+    bodyEn: "National Assembly Standing Committee · signed by Trần Thanh Mẫn",
+    signed: "2025-06-16",
+    effective: "2025-07-01",
+    uses: "Bộ 126 phường, xã mới của Hà Nội (51 phường + 75 xã) dùng cho phần tra phường sau sáp nhập.",
+    usesEn: "Hanoi's 126 new wards and communes (51 wards + 75 communes) behind the ward lookup.",
+    url: "https://vanban.chinhphu.vn/?pageid=27160&docid=214008",
+  },
+  {
+    id: "qd-1668-2024",
+    group: "law",
+    kind: "Quyết định",
+    kindEn: "Decision",
+    ref: "Quyết định 1668/QĐ-TTg",
+    title: "Phê duyệt Điều chỉnh Quy hoạch chung Thủ đô Hà Nội đến năm 2045, tầm nhìn đến năm 2065",
+    titleEn: "Approving the revised Hanoi master plan to 2045, with a vision to 2065",
+    body: "Thủ tướng Chính phủ · Trần Hồng Hà ký",
+    bodyEn: "Prime Minister · signed by Trần Hồng Hà",
+    signed: "2024-12-27",
+    uses: "Sơ đồ quy hoạch khung sắp tới. Đây là bản vẽ minh hoạ theo văn bản, không thay được bản đồ quy hoạch pháp lý.",
+    usesEn: "The upcoming framework plan sketch. It illustrates the document and is not a legal planning map.",
+    url: "https://chinhphu.vn/?pageid=27160&docid=212179",
+  },
+  {
+    id: "osm",
+    group: "data",
+    kind: "Dữ liệu mở",
+    kindEn: "Open data",
+    ref: "OpenStreetMap",
+    title: "Nền đường phố và toạ độ thực địa của 45/52 địa điểm",
+    titleEn: "Street base map and real-world coordinates for 45 of 52 places",
+    body: "Cộng đồng OpenStreetMap · giấy phép ODbL",
+    bodyEn: "OpenStreetMap contributors · ODbL licence",
+    uses: "Toạ độ dò bằng Nominatim, ngưỡng loại 900 m, sai lệch trung bình 192 m.",
+    usesEn: "Coordinates matched with Nominatim, 900 m rejection ceiling, 192 m average offset.",
+    url: "https://www.openstreetmap.org/copyright",
+  },
+  {
+    id: "openfreemap",
+    group: "data",
+    kind: "Dịch vụ",
+    kindEn: "Service",
+    ref: "OpenFreeMap",
+    title: "Máy chủ tile cho chế độ bản đồ đường phố thật",
+    titleEn: "Tile server behind the real street-map mode",
+    body: "OpenFreeMap · miễn phí, không cần API key",
+    bodyEn: "OpenFreeMap · free, no API key",
+    uses: "Nền liberty. Đổi nền bằng ?nen=duong|sang|dam.",
+    usesEn: "The liberty style. Switch with ?nen=duong|sang|dam.",
+    url: "https://openfreemap.org",
+  },
+  {
+    id: "open-meteo",
+    group: "data",
+    kind: "API",
+    kindEn: "API",
+    ref: "Open-Meteo",
+    title: "Thời tiết và chất lượng không khí Hà Nội theo thời gian thực",
+    titleEn: "Live Hanoi weather and air quality",
+    body: "Open-Meteo · miễn phí, không cần API key",
+    bodyEn: "Open-Meteo · free, no API key",
+    uses: "Huy hiệu góc phải trên, và bầu trời – sương – mưa – đèn của cảnh 3D. Tự làm mới mỗi 15 phút.",
+    usesEn: "The top-right badge, plus the sky, fog, rain and lights of the 3D scene. Refreshes every 15 minutes.",
+    url: "https://open-meteo.com",
+  },
+];
+
+// Những chỗ cố tình để trống. Ghi ra đây để người dùng biết bản đồ đang
+// thiếu gì, thay vì đoán bừa rồi họ đi nhầm.
+const SOURCE_GAPS = [
+  {
+    what: "Khung giờ cấm cụ thể trong vùng phát thải thấp",
+    whatEn: "The exact restricted hours inside the low-emission zone",
+    why: "Nghị quyết 57/2025/NQ-HĐND nêu loại phương tiện và mốc thời gian, nhưng không ấn định giờ. Chi tiết chờ đề án của UBND thành phố. Khi nào có văn bản, bản đồ mới hiện giờ.",
+    whyEn: "Resolution 57/2025/NQ-HĐND names the vehicle classes and the dates but sets no hours. The detail waits on the city government's implementation scheme. The map will show hours only once a document exists.",
+    ref: "nq-57-2025",
+  },
+  {
+    what: "Ranh giới chính xác của khu vực thí điểm trong Vành đai 1",
+    whatEn: "The exact outline of the pilot area inside Ring Road 1",
+    why: "Nghị quyết nêu 9 phường nhưng vùng thí điểm chỉ là một số khu vực trong đó. Bản đồ vẽ ranh giới phường để bạn biết đại khái ở đâu, không dùng thay bản đồ cấm đường.",
+    whyEn: "The resolution names nine wards, but the pilot covers only parts of them. The map draws ward outlines so you know roughly where, not as a substitute for an official restriction map.",
+    ref: "nq-57-2025",
+  },
+];
+
+const SOURCE_BY_ID = Object.fromEntries(SOURCES.map((item) => [item.id, item]));
+
+// Lớp dữ liệu nào cũng phải khai nguồn trước khi vẽ. Thiếu là kêu ngay ở
+// console lúc phát triển, chứ không im lặng phát hành một lớp vô căn cứ.
+const LAYER_SOURCES = new Map();
+
+function registerLayer(layerId, sourceIds) {
+  const ids = (sourceIds || []).filter((id) => SOURCE_BY_ID[id]);
+  if (!ids.length) {
+    console.warn(`[nguồn] lớp "${layerId}" chưa khai văn bản nào — không được vẽ dữ liệu pháp lý.`);
+    return false;
+  }
+  LAYER_SOURCES.set(layerId, ids);
+  return true;
+}
+
+function dmy(iso) {
+  if (!iso) return "";
+  const [y, m, d] = String(iso).split("-");
+  return d && m && y ? `${d}/${m}/${y}` : String(iso);
+}
+
+function daysSince(iso) {
+  const then = Date.parse(`${iso}T00:00:00Z`);
+  if (!Number.isFinite(then)) return 0;
+  return Math.max(0, Math.round((Date.now() - then) / 86400000));
+}
+
+function srcText(item, key) {
+  return LANG === "en" ? (item[`${key}En`] ?? item[key] ?? "") : (item[key] ?? "");
+}
+
+let sourceDialog = null;
+let sourceReturnHash = "";
+
+function sourceCard(item) {
+  const meta = [
+    escapeHtml(srcText(item, "body")),
+    item.signed ? escapeHtml(t("srcSigned", { d: dmy(item.signed) })) : null,
+    item.effective ? escapeHtml(t("srcEffective", { d: dmy(item.effective) })) : null,
+  ].filter(Boolean);
+
+  return `
+    <article class="src-card">
+      <p class="src-card__ref"><span class="src-card__kind">${escapeHtml(srcText(item, "kind"))}</span>${escapeHtml(item.ref)}</p>
+      <h3>${escapeHtml(srcText(item, "title"))}</h3>
+      <p class="src-card__meta">${meta.join(" · ")}</p>
+      ${item.replaces ? `<p class="src-card__meta">${escapeHtml(t("srcReplaces", { v: srcText(item, "replaces") }))}</p>` : ""}
+      <p class="src-card__use"><b>${escapeHtml(t("srcUse"))}:</b> ${escapeHtml(srcText(item, "uses"))}</p>
+      ${item.note ? `<p class="src-card__note">${escapeHtml(srcText(item, "note"))}</p>` : ""}
+      <a class="src-card__link" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer noopener">
+        ${escapeHtml(item.group === "law" ? t("srcOpen") : t("srcOpenData"))} <span aria-hidden="true">↗</span>
+      </a>
+    </article>`;
+}
+
+function renderSources() {
+  if (!sourceDialog) return;
+  const stale = daysSince(SOURCE_CHECKED) > SOURCE_STALE_DAYS;
+  const laws = SOURCES.filter((item) => item.group === "law");
+  const data = SOURCES.filter((item) => item.group === "data");
+
+  sourceDialog.innerHTML = `
+    <div class="src-sheet__head">
+      <div>
+        <h2>${escapeHtml(t("srcTitle"))}</h2>
+        <p class="src-sheet__checked">${escapeHtml(t("srcChecked", { d: dmy(SOURCE_CHECKED) }))}</p>
+      </div>
+      <button class="src-sheet__close" type="button" aria-label="${escapeHtml(t("srcClose"))}">✕</button>
+    </div>
+    <p class="src-sheet__lead">${escapeHtml(t("srcLead"))}</p>
+    ${stale ? `<p class="src-sheet__stale">${escapeHtml(t("srcStale", { n: daysSince(SOURCE_CHECKED) }))}</p>` : ""}
+
+    <h4 class="src-sheet__group">${escapeHtml(t("srcGroupLaw"))}</h4>
+    ${laws.map(sourceCard).join("")}
+
+    <h4 class="src-sheet__group">${escapeHtml(t("srcGroupData"))}</h4>
+    ${data.map(sourceCard).join("")}
+
+    <h4 class="src-sheet__group">${escapeHtml(t("srcGroupGap"))}</h4>
+    <p class="src-sheet__lead">${escapeHtml(t("srcGapLead"))}</p>
+    ${SOURCE_GAPS.map((gap) => {
+      const ref = SOURCE_BY_ID[gap.ref];
+      return `
+      <article class="src-card src-card--gap">
+        <h3>${escapeHtml(LANG === "en" ? gap.whatEn : gap.what)}</h3>
+        <p class="src-card__use">${escapeHtml(LANG === "en" ? gap.whyEn : gap.why)}</p>
+        ${ref ? `<a class="src-card__link" href="${escapeHtml(ref.url)}" target="_blank" rel="noreferrer noopener">${escapeHtml(ref.ref)} <span aria-hidden="true">↗</span></a>` : ""}
+      </article>`;
+    }).join("")}
+  `;
+
+  sourceDialog.querySelector(".src-sheet__close")?.addEventListener("click", () => closeSources());
+}
+
+function ensureSourceDialog() {
+  if (sourceDialog) return sourceDialog;
+  sourceDialog = document.createElement("dialog");
+  sourceDialog.id = "sourceSheet";
+  sourceDialog.className = "src-sheet";
+  sourceDialog.setAttribute("aria-label", t("srcTitle"));
+  sourceDialog.addEventListener("close", () => {
+    if (location.hash === "#/nguon") history.replaceState(null, "", `${location.pathname}${location.search}${sourceReturnHash}`);
+  });
+  sourceDialog.addEventListener("click", (event) => {
+    if (event.target === sourceDialog) closeSources();
+  });
+  document.body.appendChild(sourceDialog);
+  return sourceDialog;
+}
+
+function openSources() {
+  ensureSourceDialog();
+  renderSources();
+  if (!sourceDialog.open) {
+    sourceReturnHash = location.hash === "#/nguon" ? "" : location.hash;
+    sourceDialog.showModal();
+    if (location.hash !== "#/nguon") history.replaceState(null, "", `${location.pathname}${location.search}#/nguon`);
+  }
+}
+
+function closeSources() {
+  if (sourceDialog?.open) sourceDialog.close();
+}
+
+function bootSources() {
+  // Link "Nguồn & đối chiếu" ở chân thanh bên, và deep-link #/nguon.
+  document.addEventListener("click", (event) => {
+    const link = event.target?.closest?.("a[data-sources]");
+    if (!link) return;
+    event.preventDefault();
+    openSources();
+  });
+  window.addEventListener("hashchange", () => {
+    if (location.hash === "#/nguon") openSources();
+  });
+  if (location.hash === "#/nguon") openSources();
+}
+
+/* ==========================================================================
+   LỚP VÙNG PHÁT THẢI THẤP + TRẠM SẠC · LOW-EMISSION ZONE & EV CHARGING
+   Chồng lên nền bản đồ đường phố thật. Hai lớp này nói về quy định thật ngoài
+   đường nên phải khai nguồn (registerLayer) và phải nói rõ giới hạn của mình:
+   đường kẻ là ranh giới PHƯỜNG, vùng thí điểm chỉ là một phần bên trong, và
+   khung giờ cấm thì chưa có văn bản nào công bố nên bản đồ không hiện giờ.
+   ========================================================================== */
+
+// Ranh giới 9 phường có vùng phát thải thấp, lấy từ OpenStreetMap
+// (admin_level=6, mức phường sau sáp nhập 2025) rồi rút gọn Douglas–Peucker
+// ngưỡng 25 m: 756 xuống 171 đỉnh, lệch tối đa 28 m so với ranh giới gốc.
+// Đủ đúng để chỉ chỗ ở mức phóng người ta dùng, và dù sao đây cũng không
+// phải bản đồ pháp lý.
+const LEZ_WARDS = [
+  ["Hoàn Kiếm", [[21.0349,105.8549],[21.0279,105.8583],[21.025,105.8602],[21.0244,105.8569],[21.028,105.8442],[21.0291,105.8426],[21.0342,105.8437],[21.0341,105.8448],[21.0349,105.8449],[21.0351,105.8439],[21.0394,105.8447],[21.0392,105.8454],[21.04,105.8456],[21.0398,105.8468],[21.0408,105.8501],[21.0349,105.8549]]],
+  ["Ba Đình", [[21.0289,105.8416],[21.0283,105.8416],[21.0291,105.8426],[21.0342,105.8437],[21.0341,105.8448],[21.0349,105.8449],[21.0351,105.8439],[21.0394,105.8447],[21.0392,105.8454],[21.04,105.8456],[21.0398,105.8468],[21.0408,105.8501],[21.0506,105.8402],[21.0501,105.8394],[21.0473,105.8379],[21.0468,105.8367],[21.0439,105.8362],[21.0428,105.8358],[21.0428,105.8353],[21.0418,105.8353],[21.0416,105.8307],[21.0396,105.8287],[21.0397,105.8274],[21.0373,105.8266],[21.0371,105.8284],[21.0347,105.828],[21.0347,105.8272],[21.0321,105.827],[21.0325,105.829],[21.0289,105.8416]]],
+  ["Cửa Nam", [[21.027,105.8478],[21.0244,105.8569],[21.025,105.8602],[21.0185,105.862],[21.0184,105.8609],[21.019,105.8587],[21.0179,105.8542],[21.019,105.8477],[21.0207,105.8414],[21.0283,105.8416],[21.0291,105.8426],[21.0284,105.8433],[21.027,105.8478]]],
+  ["Hai Bà Trưng", [[21.0087,105.8633],[21.0092,105.8562],[21.0077,105.8414],[21.0207,105.8414],[21.019,105.8477],[21.0179,105.8542],[21.019,105.8587],[21.0184,105.8609],[21.0185,105.862],[21.0122,105.8636],[21.0103,105.8645],[21.0088,105.8659],[21.0087,105.8633]]],
+  ["Văn Miếu - Quốc Tử Giám", [[21.0304,105.8361],[21.0289,105.8416],[21.0077,105.8414],[21.0082,105.8397],[21.0089,105.8389],[21.016,105.8324],[21.0182,105.8297],[21.0278,105.8342],[21.0304,105.8361]]],
+  ["Ô Chợ Dừa", [[21.0305,105.8358],[21.0322,105.83],[21.0313,105.8297],[21.0277,105.8248],[21.0234,105.8198],[21.0166,105.8149],[21.0139,105.8188],[21.0161,105.8209],[21.0167,105.8235],[21.0208,105.8257],[21.0182,105.8297],[21.0278,105.8342],[21.0304,105.8361],[21.0305,105.8358]]],
+  ["Giảng Võ", [[21.0302,105.8013],[21.0286,105.8042],[21.0274,105.8093],[21.025,105.8113],[21.0199,105.8082],[21.0166,105.8149],[21.0234,105.8198],[21.0277,105.8248],[21.0313,105.8297],[21.0322,105.83],[21.0325,105.829],[21.0306,105.8159],[21.0313,105.8133],[21.0339,105.814],[21.0355,105.8088],[21.0362,105.8083],[21.0371,105.8063],[21.0328,105.8037],[21.0302,105.8013]]],
+  ["Ngọc Hà", [[21.0397,105.8274],[21.0373,105.8266],[21.0371,105.8284],[21.0347,105.828],[21.0347,105.8272],[21.0321,105.827],[21.0306,105.8165],[21.0313,105.8133],[21.0339,105.814],[21.0355,105.8088],[21.0362,105.8083],[21.0371,105.8063],[21.0401,105.8062],[21.0403,105.8069],[21.0414,105.8065],[21.0454,105.8061],[21.048,105.8051],[21.0476,105.8056],[21.0478,105.8061],[21.0473,105.8082],[21.0464,105.8105],[21.0427,105.8152],[21.0418,105.8219],[21.0397,105.8274]]],
+  ["Tây Hồ", [[21.0578,105.8352],[21.0531,105.8378],[21.0506,105.8402],[21.0501,105.8394],[21.0473,105.8379],[21.0468,105.8367],[21.0439,105.8362],[21.0428,105.8358],[21.0428,105.8353],[21.0418,105.8353],[21.0416,105.8307],[21.0395,105.8286],[21.0418,105.8219],[21.0427,105.8152],[21.0464,105.8105],[21.0473,105.8082],[21.0478,105.8061],[21.0476,105.8056],[21.048,105.8051],[21.0515,105.8045],[21.0622,105.8045],[21.0686,105.8081],[21.0761,105.8114],[21.0846,105.8167],[21.082,105.8176],[21.0774,105.8206],[21.0727,105.8257],[21.0681,105.8265],[21.0648,105.8292],[21.0646,105.8308],[21.0641,105.8316],[21.061,105.8328],[21.0578,105.8352]]],
+];
+
+// Trạm sạc xe điện từ OpenStreetMap (amenity=charging_station), gom về lưới
+// ~11 m và mã hoá delta cho gọn: mỗi điểm là "dlat,dlng,vinfast" tính theo
+// đơn vị 1e-4 độ, cộng dồn từ điểm trước.
+const CHARGE_PACKED =
+  "208577,1058697,1 306,-733,1 411,-116,1 6,-72,1 1,108,1 4,-36,1 18,656,1 1,-657,1 7,666,1 3,-596,1 4,-71,1 92,2362,0 1,0,0 0,1,0 1,0,0 28,-399,0 1,-1518,1 0,1518,0 0,1,0 0,1,0 22,11,1 1,0,0 1,-1,0 0,1,0 1,-1,0 1,-1290,1 0,1290,0 1,-1,0 1,0,0 1,-1,0 1,0,0 1,-1,0 14,-1284,1 20,-1020,1 43,50,1 33,-147,1 4,-11,1 6,1192,1 17,-1006,1 1,854,1 2,0,1 8,-207,1 0,205,1 1,1,1 2,-226,1 5,313,1 10,-975,0 10,141,1 12,227,1 24,855,1 0,1685,1 6,-1676,1 15,-20,1 3,-377,1 4,-8,1 6,-2,1 10,-505,1 12,-250,1 46,509,1 1,292,0 1,-762,1 2,0,1 28,322,1 12,475,1 3,1,1 14,-1088,1 9,2047,1 11,-6,1 1,-3,1 0,5,1 4,70,1 1,-5,1 1,1,1 3,-61,1 1,14,1 6,-38,1 1,4,1 1,-723,1 0,15,1 0,709,1 4,-1528,1 0,1689,1 2,-4,1 2,-126,1 0,120,1 3,-885,1 1,742,1 2,-4,1 7,-1525,1 5,1720,1 4,-177,1 1,0,1 2,182,1 3,-25,1 1,18,1 1,-186,1 2,-3,1 0,184,1 7,-928,1 2,0,1 2,771,1 10,-745,1 1,-2,1 2,-27,1 0,5,1 4,522,1 1,-1814,1 0,1304,1 2,-1305,1 2,0,1 2,1302,1 2,-1464,1 18,783,1 2,144,1 0,2,1 2,-106,1 1,-127,1 1,-81,1 0,207,1 1,-186,1 1,304,1 1,1,1 0,1273,1 1,-2,1 3,-2049,1 2,0,1 9,643,1 2,-644,1 2,28,1 6,155,1 0,268,1 2,-443,1 4,557,1 5,-552,1 0,550,1 1,-551,1 4,155,1 1,398,1 6,362,1 2,-398,1 2,-379,1 2,794,1 1,-792,1 4,5,1 2,-24,1 0,427,1 1,-556,1 5,15,1 4,25,1 2,0,1 4,7,1 1,-52,1 0,48,1 2,-35,1 0,759,1 6,325,1 33,-566,1 15,-95,1 0,2,1 20,-588,1 3,249,1 12,656,0 7,-870,0 2,1801,1 15,-1246,1 1,-3,1 27,272,1 1,-1,1 9,464,0 23,399,1 4,1006,1 43,-2143,1 5,331,1 3,1,1 18,-347,1 2,-201,1 7,595,1 1,-576,1 8,-17,1 0,350,1 0,1,1 1,-349,1 0,1734,1 1,1,1 17,-254,1 16,-1027,1 3,1013,1 10,-1654,1 1,1829,1 4,32,1 8,-201,1 3,-1347,1 3,-134,1 7,1444,1 3,-4,1 1,46,1 2,0,1 6,-891,1 0,926,1 8,-1431,1 9,1497,1 1,-129,1 2,131,1 16,-150,1 6,58,1 8,80,1 14,-11,1 4,-4,1 3,-71,1 2,15,1 0,70,1 2,-84,1 0,12,1 2,-1292,1 20,957,1 19,352,1 4,8,1 1,-274,1 32,294,1 2,3,1 33,-8,1 11,-1172,1 10,831,1 8,-525,1 5,-9,1 1,-1,1 16,791,1 3,-1189,1 16,254,1 9,-20,1 9,-245,1 38,282,1 119,414,1 0,8,0 7,9,0 4,-27,1 4,36,0 9,11,0 12,15,0 10,1004,1 1,-990,0 109,1011,1 94,-1340,1 108,1804,1 43,-1411,1 55,-1076,1 83,1139,1 71,-375,1 69,-1052,1 222,995,0 6,1258,1 22,626,1 163,-2879,1 15,883,1 2,-433,1 35,566,0 17,1188,1 54,450,1 263,106,1";
+
+let chargeCache = null;
+
+function chargePoints() {
+  if (chargeCache) return chargeCache;
+  let lat = 0;
+  let lng = 0;
+  chargeCache = CHARGE_PACKED.split(" ").map((token) => {
+    const [dLat, dLng, vin] = token.split(",").map(Number);
+    lat += dLat;
+    lng += dLng;
+    return { lat: lat / 1e4, lng: lng / 1e4, vin: vin === 1 };
+  });
+  return chargeCache;
+}
+
+// Tia ngang đếm số lần cắt cạnh — đủ cho 9 đa giác đơn.
+function insideRing(pos, ring) {
+  let inside = false;
+  for (let i = 0, k = ring.length - 1; i < ring.length; k = i, i += 1) {
+    const [latI, lngI] = ring[i];
+    const [latK, lngK] = ring[k];
+    if (latI > pos.lat !== latK > pos.lat && pos.lng < ((lngK - lngI) * (pos.lat - latI)) / (latK - latI) + lngI) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function lezWardOf(item) {
+  const pos = realPos(item);
+  if (!pos) return null;
+  const hit = LEZ_WARDS.find(([, ring]) => insideRing(pos, ring));
+  return hit ? hit[0] : null;
+}
+
+/* ---------- Bật tắt lớp trên nền MapLibre ---------- */
+
+const mapLayerState = { lez: false, charge: false };
+
+function lezGeoJson() {
+  return {
+    type: "FeatureCollection",
+    features: LEZ_WARDS.map(([name, ring]) => ({
+      type: "Feature",
+      properties: { name },
+      geometry: { type: "Polygon", coordinates: [ring.map(([lat, lng]) => [lng, lat])] },
+    })),
+  };
+}
+
+function chargeGeoJson() {
+  return {
+    type: "FeatureCollection",
+    features: chargePoints().map((p) => ({
+      type: "Feature",
+      properties: { vin: p.vin ? 1 : 0 },
+      geometry: { type: "Point", coordinates: [p.lng, p.lat] },
+    })),
+  };
+}
+
+let layerRetry = false;
+
+function ensureMapLayers() {
+  if (!mapObj) return false;
+  // Style có thể còn đang tải (hoặc vừa đổi nền): chưa thêm lớp được thì hẹn
+  // thử lại đúng một lần khi bản đồ rảnh, chứ không bỏ luôn như trước.
+  if (!mapObj.isStyleLoaded()) {
+    if (!layerRetry) {
+      layerRetry = true;
+      mapObj.once("idle", () => {
+        layerRetry = false;
+        if (ensureMapLayers()) syncMapLayers();
+      });
+    }
+    return false;
+  }
+
+  if (!mapObj.getSource("lez")) {
+    mapObj.addSource("lez", { type: "geojson", data: lezGeoJson() });
+    mapObj.addLayer({
+      id: "lez-fill",
+      type: "fill",
+      source: "lez",
+      layout: { visibility: "none" },
+      paint: { "fill-color": "#d98324", "fill-opacity": 0.16 },
+    });
+    // Nét đứt là cố ý: nhắc rằng đây là ranh giới chỉ chỗ, không phải vạch cấm.
+    mapObj.addLayer({
+      id: "lez-line",
+      type: "line",
+      source: "lez",
+      layout: { visibility: "none", "line-join": "round" },
+      paint: { "line-color": "#b3651a", "line-width": 2, "line-dasharray": [3, 2] },
+    });
+    mapObj.on("click", "lez-fill", () => openLezNote());
+    mapObj.on("mouseenter", "lez-fill", () => {
+      mapObj.getCanvas().style.cursor = "pointer";
+    });
+    mapObj.on("mouseleave", "lez-fill", () => {
+      mapObj.getCanvas().style.cursor = "";
+    });
+  }
+
+  if (!mapObj.getSource("charge")) {
+    mapObj.addSource("charge", { type: "geojson", data: chargeGeoJson() });
+    mapObj.addLayer({
+      id: "charge-dot",
+      type: "circle",
+      source: "charge",
+      layout: { visibility: "none" },
+      paint: {
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 2.4, 14, 4.5, 17, 7],
+        "circle-color": ["case", ["==", ["get", "vin"], 1], "#1f7a4d", "#2b6cb0"],
+        "circle-stroke-width": 1.4,
+        "circle-stroke-color": "#ffffff",
+        "circle-opacity": 0.92,
+      },
+    });
+  }
+  return true;
+}
+
+function syncMapLayers() {
+  if (!ensureMapLayers()) return;
+  const show = (id, on) => {
+    if (mapObj.getLayer(id)) mapObj.setLayoutProperty(id, "visibility", on ? "visible" : "none");
+  };
+  show("lez-fill", mapLayerState.lez);
+  show("lez-line", mapLayerState.lez);
+  show("charge-dot", mapLayerState.charge);
+}
+
+async function toggleMapLayer(key) {
+  // Lớp chỉ có nghĩa trên nền bản đồ thật, nên bật nó lên trước.
+  if (!mapMode) await setMapMode(true, { silent: true });
+  if (!mapObj) return;
+  mapLayerState[key] = !mapLayerState[key];
+  syncMapLayers();
+  renderMapLayerChips();
+  renderMapNote();
+  if (mapLayerState[key]) {
+    if (key === "lez") openLezNote();
+    else toast(t("chargeWarn"), 6000);
+  }
+}
+
+/* ---------- Chip bật lớp + ghi chú giải thích ---------- */
+
+function renderMapLayerChips() {
+  const host = document.querySelector("#pinLegend");
+  if (!host) return;
+  let strip = document.querySelector("#mapLayers");
+  if (!strip) {
+    strip = document.createElement("div");
+    strip.id = "mapLayers";
+    strip.className = "map-layers";
+    host.insertAdjacentElement("afterend", strip);
+  }
+  const items = [
+    { key: "lez", name: t("lezName"), title: t("lezOn"), tone: "lez" },
+    { key: "charge", name: t("chargeName"), title: t("chargeOn", { n: chargePoints().length }), tone: "charge" },
+  ];
+  strip.innerHTML = items
+    .map(
+      (item) =>
+        `<button class="map-layers__item map-layers__item--${item.tone}" type="button" data-layer="${item.key}" ` +
+        `aria-pressed="${mapLayerState[item.key]}" title="${escapeHtml(item.title)}"><i></i>${escapeHtml(item.name)}</button>`,
+    )
+    .join("");
+  strip.querySelectorAll("[data-layer]").forEach((button) => {
+    button.addEventListener("click", () => toggleMapLayer(button.dataset.layer));
+  });
+}
+
+function sourceLinkHtml(id) {
+  const item = SOURCE_BY_ID[id];
+  if (!item) return "";
+  return `<a class="map-note__src" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer noopener">${escapeHtml(item.ref)} <span aria-hidden="true">↗</span></a>`;
+}
+
+function renderMapNote() {
+  let note = document.querySelector("#mapNote");
+  const on = mapMode && (mapLayerState.lez || mapLayerState.charge);
+  if (!on) {
+    note?.remove();
+    return;
+  }
+  if (!note) {
+    note = document.createElement("section");
+    note.id = "mapNote";
+    note.className = "map-note";
+    document.querySelector(".hud-left")?.appendChild(note);
+  }
+  const blocks = [];
+  if (mapLayerState.lez) {
+    blocks.push(`
+      <article class="map-note__block">
+        <h3>${escapeHtml(t("lezTitle"))}</h3>
+        <p class="map-note__when">${escapeHtml(t("lezWhen"))}</p>
+        <p>${escapeHtml(t("lezWhere"))}</p>
+        <p class="map-note__warn">${escapeHtml(t("lezWarn"))}</p>
+        <p>${escapeHtml(t("lezWhat"))}</p>
+        <p class="map-note__gap"><b>${escapeHtml(t("lezHours"))}.</b> ${escapeHtml(t("lezHoursWhy"))}</p>
+        <p class="map-note__next">${escapeHtml(t("lezNext"))}</p>
+        <p class="map-note__srcs">${escapeHtml(t("srcSee"))}: ${sourceLinkHtml("nq-57-2025")} ${sourceLinkHtml("ct-20-2025")}</p>
+      </article>`);
+  }
+  if (mapLayerState.charge) {
+    const points = chargePoints();
+    blocks.push(`
+      <article class="map-note__block">
+        <h3>${escapeHtml(t("chargeTitle"))}</h3>
+        <p>${escapeHtml(t("chargeCount", { n: points.length, v: points.filter((p) => p.vin).length }))}</p>
+        <p class="map-note__warn">${escapeHtml(t("chargeWarn"))}</p>
+        <p class="map-note__srcs">${escapeHtml(t("srcSee"))}: ${sourceLinkHtml("osm")}</p>
+      </article>`);
+  }
+  note.innerHTML = blocks.join("");
+}
+
+function openLezNote() {
+  if (!mapLayerState.lez) return;
+  renderMapNote();
+  document.querySelector("#mapNote")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+function bootMapLayers() {
+  registerLayer("lez", ["nq-57-2025", "ct-20-2025", "luat-thu-do-2024", "osm"]);
+  registerLayer("charge", ["osm"]);
+  renderMapLayerChips();
+  const asked = (QUERY.get("lop") || "").toLowerCase().split(",").filter(Boolean);
+  if (asked.includes("lez") || asked.includes("phatthai")) toggleMapLayer("lez");
+  if (asked.includes("sac") || asked.includes("charge")) toggleMapLayer("charge");
+}
+
+/* ---------- Cài về màn hình chính + chạy offline ---------- */
+
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator) || location.protocol === "file:") return;
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {
+      /* offline là phần thêm, hỏng cũng không sao */
+    });
+  });
+}
+
+/* ---------- Khởi động: nạp Sheet xong mới dựng scene ---------- */
+
+bootLivePlaces().finally(() => {
+  init();
+  bootWeather();
+  bootMapMode();
+  bootSources();
+  bootMapLayers();
+  registerServiceWorker();
+});
+
+window.HanoiAtlas = {
+  get places() {
+    return STARTUPS.length;
+  },
+  sources: DATA_SOURCES,
+  flyToArea: setActiveArea,
+};
+
+window.__atlas = {
+  scene,
+  camera,
+  controls,
+  project,
+  THREE,
+  selectStartup,
+  setMapMode,
+  get map() {
+    return mapObj;
+  },
+  debug: () => ({
+    lang: LANG,
+    filters: [...activeStages],
+    userPos,
+    viewFit: { ...viewFit },
+    mapMode,
+    mapPins: mapMarkers.size,
+    mapError: mapLastError,
+    mapLayers: { ...mapLayerState },
+    lezInside: STARTUPS.filter((item) => lezWardOf(item)).length,
+    realCoords: Object.keys(REAL_COORDS).length,
+  }),
+};

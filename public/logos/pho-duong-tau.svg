@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Phố cà phê đường tàu">
+  <rect width="64" height="64" rx="14" fill="#1fa99b"/>
+  <g fill="#ffffff">
+    <rect x="18" y="10" width="28" height="34" rx="6"/>
+    <rect x="22" y="16" width="20" height="10" rx="2" fill="#1fa99b"/>
+    <circle cx="25" cy="37" r="3" fill="#1fa99b"/>
+    <circle cx="39" cy="37" r="3" fill="#1fa99b"/>
+    <path d="M22 47l-5 8h6l4-6Zm20 0 5 8h-6l-4-6Z"/></g>
+</svg>

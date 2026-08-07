@@ -3935,16 +3935,15 @@ function makeLiveSky(stops) {
   return tex;
 }
 
-// US AQI → hệ số sương + màu chấm + nhãn (dịch theo ngôn ngữ đang chọn).
+// VN_AQI → hệ số sương + màu chấm + nhãn. Màu lấy đúng mã RGB trong Bảng 1
+// của Quyết định 1459, để chấm trên huy hiệu trùng màu với bản tin chính
+// thức và các bảng điện tử ngoài đường.
+const AQI_FOG = { aqiGood: 0.92, aqiFair: 1, aqiPoor: 1.18, aqiBad: 1.4, aqiVeryBad: 1.65, aqiHazard: 1.9 };
+
 function aqiInfo(aqi) {
-  if (aqi == null || !Number.isFinite(Number(aqi))) return { mul: 1, color: "#8fa3b8", key: null };
-  const v = Number(aqi);
-  if (v <= 50) return { mul: 0.92, color: "#3fbf6f", key: "aqiGood" };
-  if (v <= 100) return { mul: 1, color: "#e8c33f", key: "aqiFair" };
-  if (v <= 150) return { mul: 1.18, color: "#e8923f", key: "aqiPoor" };
-  if (v <= 200) return { mul: 1.4, color: "#e0524a", key: "aqiBad" };
-  if (v <= 300) return { mul: 1.65, color: "#9d5fc9", key: "aqiVeryBad" };
-  return { mul: 1.9, color: "#8a3b47", key: "aqiHazard" };
+  const band = vnAqiBand(aqi);
+  if (!band) return { mul: 1, color: "#8fa3b8", key: null, band: null };
+  return { mul: AQI_FOG[band.key] ?? 1, color: band.color, key: band.key, band };
 }
 
 // Chế độ trời → chữ hiển thị trên huy hiệu, theo ngôn ngữ đang chọn.
@@ -4083,6 +4082,9 @@ let liveBadgeEl = null;
 let lastEnv = null;
 
 function renderLiveBadge(env) {
+  // Giữ lại trạng thái cuối để bảng chi tiết không khí đọc được, và để đổi
+  // ngôn ngữ thì vẽ lại đúng số liệu chứ không phải chờ lượt gọi mạng sau.
+  liveEnv.env = env;
   lastEnv = env;
   if (!liveBadgeEl) {
     const style = document.createElement("style");
@@ -4101,11 +4103,11 @@ function renderLiveBadge(env) {
     // bên bị ẩn nên đây là chỗ luôn chạm tới được.
     liveBadgeEl.tabIndex = 0;
     liveBadgeEl.style.cursor = "pointer";
-    liveBadgeEl.addEventListener("click", () => openSources());
+    liveBadgeEl.addEventListener("click", () => openAir());
     liveBadgeEl.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        openSources();
+        openAir();
       }
     });
     const host = document.querySelector(".hud-top-right");
@@ -4131,6 +4133,282 @@ function renderLiveBadge(env) {
     .join(" · ");
 }
 
+/* ==========================================================================
+   CHỈ SỐ CHẤT LƯỢNG KHÔNG KHÍ VIỆT NAM · VN_AQI
+   Nguồn duy nhất: Quyết định 1459/QĐ-TCMT ngày 12/11/2019 của Tổng cục Môi
+   trường. Bảng phân mức, bảng BPi, công thức nội suy và toàn bộ khuyến cáo
+   dưới đây lấy nguyên từ văn bản đó.
+
+   Vì sao phải tự tính thay vì lấy con số có sẵn: Open-Meteo trả về US AQI,
+   tính theo mốc của Mỹ. Cùng một bầu không khí, hai thang cho hai con số
+   khác hẳn nhau — sáng nay Hà Nội là 93 theo thang Mỹ nhưng 64 theo thang
+   Việt Nam. Người Việt đọc báo, xem bản tin đều thấy VN_AQI, nên hiện số Mỹ
+   mà chỉ đề "AQI" là đánh lừa người đọc, dù không cố ý.
+
+   Bản đồ tính AQI NGÀY (AQId) chứ không phải AQI giờ. Lý do: AQI ngày được
+   quyết định quy định đầy đủ bằng lời — trung bình 24 giờ với bụi, giá trị
+   1 giờ lớn nhất trong ngày với khí — nên làm theo được chính xác. AQI giờ
+   thì cần hệ số Nowcast mà văn bản in dưới dạng công thức ảnh, không chép
+   lại chắc chắn được. Thà đúng một chỉ số còn hơn đoán hai.
+   ========================================================================== */
+
+// Bảng 2 của quyết định. Đơn vị µg/m³ cho tất cả, kể cả CO.
+const VNAQI_LEVELS = [0, 50, 100, 150, 200, 300, 400, 500];
+const VNAQI_BP = {
+  o3_1h: [0, 160, 200, 300, 400, 800, 1000, 1200],
+  o3_8h: [0, 100, 120, 170, 210, 400, null, null],
+  co: [0, 10000, 30000, 45000, 60000, 90000, 120000, 150000],
+  so2: [0, 125, 350, 550, 800, 1600, 2100, 2630],
+  no2: [0, 100, 200, 700, 1200, 2350, 3100, 3850],
+  pm10: [0, 50, 150, 250, 350, 420, 500, 600],
+  pm25: [0, 25, 50, 80, 150, 250, 350, 500],
+};
+
+// Công thức 1: nội suy tuyến tính giữa hai mốc kề nhau.
+function vnAqiOf(value, key) {
+  const bp = VNAQI_BP[key];
+  if (!bp || !Number.isFinite(value) || value < 0) return null;
+  for (let i = 0; i < bp.length - 1; i += 1) {
+    const lo = bp[i];
+    const hi = bp[i + 1];
+    if (hi == null) break;
+    if (value <= hi) {
+      const iLo = VNAQI_LEVELS[i];
+      const iHi = VNAQI_LEVELS[i + 1];
+      return Math.round(((iHi - iLo) / (hi - lo)) * (value - lo) + iLo);
+    }
+  }
+  return 500; // vượt mốc cuối cùng thì kịch thang
+}
+
+const mean = (list) => (list.length ? list.reduce((a, b) => a + b, 0) / list.length : null);
+
+// Trung bình trượt 8 giờ, lấy giá trị lớn nhất trong ngày — dùng cho O3.
+function maxRollingMean(values, span) {
+  let best = null;
+  for (let i = 0; i + span <= values.length; i += 1) {
+    const window = values.slice(i, i + span).filter(Number.isFinite);
+    if (window.length < span) continue;
+    const avg = mean(window);
+    if (best == null || avg > best) best = avg;
+  }
+  return best;
+}
+
+// AQI ngày: bụi lấy trung bình 24 giờ, khí lấy giá trị 1 giờ lớn nhất trong
+// ngày, O3 lấy cả 1 giờ lớn nhất lẫn 8 giờ lớn nhất. Kết quả là giá trị lớn
+// nhất trong các thông số, và thông số nào lớn nhất thì đó là thủ phạm.
+function vnAqiDaily(series) {
+  const clean = (arr) => (arr || []).filter((v) => Number.isFinite(v));
+  const pm25 = clean(series.pm25);
+  const pm10 = clean(series.pm10);
+  // Quyết định bắt buộc phải có ít nhất một trong hai thông số bụi.
+  if (!pm25.length && !pm10.length) return null;
+
+  const parts = [
+    { key: "pm25", label: "PM2.5", aqi: pm25.length ? vnAqiOf(mean(pm25), "pm25") : null },
+    { key: "pm10", label: "PM10", aqi: pm10.length ? vnAqiOf(mean(pm10), "pm10") : null },
+    { key: "so2", label: "SO₂", aqi: clean(series.so2).length ? vnAqiOf(Math.max(...clean(series.so2)), "so2") : null },
+    { key: "no2", label: "NO₂", aqi: clean(series.no2).length ? vnAqiOf(Math.max(...clean(series.no2)), "no2") : null },
+    { key: "co", label: "CO", aqi: clean(series.co).length ? vnAqiOf(Math.max(...clean(series.co)), "co") : null },
+    { key: "o3_1h", label: "O₃ (1h)", aqi: clean(series.o3).length ? vnAqiOf(Math.max(...clean(series.o3)), "o3_1h") : null },
+    { key: "o3_8h", label: "O₃ (8h)", aqi: (() => { const m = maxRollingMean(series.o3 || [], 8); return m == null ? null : vnAqiOf(m, "o3_8h"); })() },
+  ].filter((p) => p.aqi != null);
+
+  if (!parts.length) return null;
+  const worst = parts.reduce((a, b) => (b.aqi > a.aqi ? b : a));
+  return {
+    aqi: worst.aqi,
+    driver: worst.label,
+    pm25Avg: pm25.length ? Math.round(mean(pm25) * 10) / 10 : null,
+    parts,
+  };
+}
+
+// Bảng 1, 4 và 5 của quyết định. Màu lấy đúng mã RGB trong văn bản. Phần
+// khuyến cáo giữ nguyên văn tiếng Việt; bản tiếng Anh chỉ là dịch tham khảo.
+const VNAQI_BANDS = [
+  {
+    max: 50,
+    key: "aqiGood",
+    color: "rgb(0,228,0)",
+    effect: "Chất lượng không khí tốt, không ảnh hưởng tới sức khỏe.",
+    effectEn: "Air quality is good and does not affect health.",
+    normal: "Tự do thực hiện các hoạt động ngoài trời.",
+    normalEn: "Outdoor activities without restriction.",
+    sensitive: "Tự do thực hiện các hoạt động ngoài trời.",
+    sensitiveEn: "Outdoor activities without restriction.",
+  },
+  {
+    max: 100,
+    key: "aqiFair",
+    color: "rgb(255,255,0)",
+    effect:
+      "Chất lượng không khí ở mức chấp nhận được. Tuy nhiên, đối với những người nhạy cảm (người già, trẻ em, người mắc các bệnh hô hấp, tim mạch…) có thể chịu những tác động nhất định tới sức khỏe.",
+    effectEn:
+      "Air quality is acceptable. Sensitive people — the elderly, children, those with respiratory or heart conditions — may still feel some effects.",
+    normal: "Tự do thực hiện các hoạt động ngoài trời.",
+    normalEn: "Outdoor activities without restriction.",
+    sensitive: "Nên theo dõi các triệu chứng như ho hoặc khó thở, nhưng vẫn có thể hoạt động bên ngoài.",
+    sensitiveEn: "Watch for symptoms such as coughing or shortness of breath, but outdoor activity is still fine.",
+  },
+  {
+    max: 150,
+    key: "aqiPoor",
+    color: "rgb(255,126,0)",
+    effect: "Những người nhạy cảm gặp phải các vấn đề về sức khỏe, những người bình thường ít ảnh hưởng.",
+    effectEn: "Sensitive groups experience health effects; the general public is affected little.",
+    normal:
+      "Những người thấy có triệu chứng đau mắt, ho hoặc đau họng… nên cân nhắc giảm các hoạt động ngoài trời. Đối với học sinh, có thể hoạt động bên ngoài, nhưng nên giảm bớt việc tập thể dục kéo dài.",
+    normalEn:
+      "Anyone with sore eyes, a cough or a sore throat should consider cutting back outdoor activity. Schoolchildren may stay outside but should do less prolonged exercise.",
+    sensitive:
+      "Nên giảm các hoạt động mạnh và giảm thời gian hoạt động ngoài trời. Những người mắc bệnh hen suyễn có thể cần sử dụng thuốc thường xuyên hơn.",
+    sensitiveEn:
+      "Reduce strenuous activity and time spent outdoors. People with asthma may need their medication more often.",
+  },
+  {
+    max: 200,
+    key: "aqiBad",
+    color: "rgb(255,0,0)",
+    effect:
+      "Những người bình thường bắt đầu có các ảnh hưởng tới sức khỏe, nhóm người nhạy cảm có thể gặp những vấn đề sức khỏe nghiêm trọng hơn.",
+    effectEn:
+      "The general public begins to feel health effects; sensitive groups may face more serious problems.",
+    normal: "Mọi người nên giảm các hoạt động mạnh khi ở ngoài trời, tránh tập thể dục kéo dài và nghỉ ngơi nhiều hơn trong nhà.",
+    normalEn: "Everyone should ease off strenuous outdoor activity, avoid prolonged exercise and rest more indoors.",
+    sensitive: "Nên ở trong nhà và giảm hoạt động mạnh. Nếu cần thiết phải ra ngoài, hãy đeo khẩu trang đạt tiêu chuẩn.",
+    sensitiveEn: "Stay indoors and reduce strenuous activity. If you must go out, wear a properly rated mask.",
+  },
+  {
+    max: 300,
+    key: "aqiVeryBad",
+    color: "rgb(143,63,151)",
+    effect: "Cảnh báo hưởng tới sức khỏe: mọi người bị ảnh hưởng tới sức khỏe nghiêm trọng hơn.",
+    effectEn: "Health alert: everyone is affected more seriously.",
+    normal:
+      "Mọi người hạn chế tối đa các hoạt động ngoài trời và chuyển tất cả các hoạt động vào trong nhà. Nếu cần thiết phải ra ngoài, hãy đeo khẩu trang đạt tiêu chuẩn.",
+    normalEn:
+      "Keep outdoor activity to a minimum and move everything indoors. If you must go out, wear a properly rated mask.",
+    sensitive: "Nên ở trong nhà và giảm hoạt động mạnh.",
+    sensitiveEn: "Stay indoors and reduce strenuous activity.",
+  },
+  {
+    max: 500,
+    key: "aqiHazard",
+    color: "rgb(126,0,35)",
+    effect: "Cảnh báo khẩn cấp về sức khỏe: Toàn bộ dân số bị ảnh hưởng tới sức khỏe tới mức nghiêm trọng.",
+    effectEn: "Health emergency: the entire population is seriously affected.",
+    normal: "Mọi người nên ở trong nhà, đóng cửa ra vào và cửa sổ. Nếu cần thiết phải ra ngoài, hãy đeo khẩu trang đạt tiêu chuẩn.",
+    normalEn: "Everyone should stay indoors with doors and windows shut. If you must go out, wear a properly rated mask.",
+    sensitive: "Mọi người nên ở trong nhà, đóng cửa ra vào và cửa sổ. Nếu cần thiết phải ra ngoài, hãy đeo khẩu trang đạt tiêu chuẩn.",
+    sensitiveEn: "Everyone should stay indoors with doors and windows shut. If you must go out, wear a properly rated mask.",
+  },
+];
+
+function vnAqiBand(aqi) {
+  if (aqi == null || !Number.isFinite(Number(aqi))) return null;
+  const v = Number(aqi);
+  return VNAQI_BANDS.find((b) => v <= b.max) || VNAQI_BANDS[VNAQI_BANDS.length - 1];
+}
+
+
+/* ---------- Bảng chi tiết chất lượng không khí ---------- */
+
+let airDialog = null;
+let airReturnHash = "";
+
+function ensureAirDialog() {
+  if (airDialog) return airDialog;
+  airDialog = document.createElement("dialog");
+  airDialog.id = "airSheet";
+  airDialog.className = "src-sheet";
+  airDialog.setAttribute("aria-label", t("airTitle"));
+  airDialog.addEventListener("close", () => {
+    if (location.hash === "#/khong-khi") {
+      history.replaceState(null, "", `${location.pathname}${location.search}${airReturnHash}`);
+    }
+  });
+  airDialog.addEventListener("click", (event) => {
+    if (event.target === airDialog) airDialog.close();
+  });
+  document.body.appendChild(airDialog);
+  return airDialog;
+}
+
+function renderAir() {
+  const dialog = ensureAirDialog();
+  const env = liveEnv.env;
+  const band = vnAqiBand(env?.aqi);
+  const pick = (item, key) => (LANG === "en" ? (item[`${key}En`] ?? item[key]) : item[key]);
+
+  if (!band) {
+    dialog.innerHTML = `<div class="src-sheet__head"><h2>${escapeHtml(t("airTitle"))}</h2>
+      <button class="src-sheet__close" type="button">${escapeHtml(t("srcClose"))}</button></div>
+      <p class="src-sheet__lead">${escapeHtml(t("airNone"))}</p>`;
+  } else {
+    const scale = VNAQI_BANDS.map((b) => {
+      const on = b === band;
+      const lo = VNAQI_BANDS.indexOf(b) === 0 ? 0 : VNAQI_BANDS[VNAQI_BANDS.indexOf(b) - 1].max + 1;
+      return `<li class="air-scale__item${on ? " is-now" : ""}"><i style="background:${b.color}"></i>` +
+        `<b>${lo}–${b.max}</b><span>${escapeHtml(t(b.key))}</span></li>`;
+    }).join("");
+
+    const parts = (env.aqiDriver ? `<p class="air-driver">${escapeHtml(t("airDriver", { p: env.aqiDriver }))}</p>` : "");
+    const pm = env.pm25Avg != null
+      ? `<p class="air-pm">${escapeHtml(t("airPm", { avg: env.pm25Avg, now: env.pm25Now != null ? Math.round(env.pm25Now * 10) / 10 : "—" }))}</p>`
+      : "";
+    const us = env.usAqi != null
+      ? `<p class="src-sheet__gapnote">${escapeHtml(t("airVsUs", { us: Math.round(env.usAqi), vn: env.aqi }))}</p>`
+      : "";
+
+    dialog.innerHTML = `
+      <div class="src-sheet__head">
+        <h2>${escapeHtml(t("airTitle"))}</h2>
+        <button class="src-sheet__close" type="button">${escapeHtml(t("srcClose"))}</button>
+      </div>
+      <div class="air-now" style="--band:${band.color}">
+        <b>${env.aqi}</b>
+        <span>${escapeHtml(t(band.key))}</span>
+        <small>${escapeHtml(t("airWhat"))}</small>
+      </div>
+      ${env.demo ? `<p class="src-sheet__gapnote">${escapeHtml(t("wxDemo"))}</p>` : ""}
+      ${parts}
+      ${pm}
+      <ul class="air-scale">${scale}</ul>
+      <article class="air-block">
+        <h3>${escapeHtml(t("airEffect"))}</h3>
+        <p>${escapeHtml(pick(band, "effect"))}</p>
+      </article>
+      <article class="air-block">
+        <h3>${escapeHtml(t("airNormal"))}</h3>
+        <p>${escapeHtml(pick(band, "normal"))}</p>
+      </article>
+      <article class="air-block air-block--sensitive">
+        <h3>${escapeHtml(t("airSensitive"))}</h3>
+        <p>${escapeHtml(pick(band, "sensitive"))}</p>
+        <small>${escapeHtml(t("airWho"))}</small>
+      </article>
+      ${LANG === "en" ? `<p class="src-sheet__gapnote">${escapeHtml(t("airEnNote"))}</p>` : ""}
+      ${us}
+      <p class="map-note__srcs">${escapeHtml(t("srcSee"))}: ${sourceLinkHtml("qd-1459-2019")} ${sourceLinkHtml("open-meteo")}
+        <a class="map-note__src" href="#/nguon" data-sources>${escapeHtml(t("srcBadge"))} <span aria-hidden="true">↗</span></a></p>`;
+  }
+  dialog.querySelector(".src-sheet__close")?.addEventListener("click", () => dialog.close());
+}
+
+function openAir() {
+  ensureAirDialog();
+  renderAir();
+  if (!airDialog.open) {
+    airReturnHash = location.hash === "#/khong-khi" ? "" : location.hash;
+    airDialog.showModal();
+    if (location.hash !== "#/khong-khi") {
+      history.replaceState(null, "", `${location.pathname}${location.search}#/khong-khi`);
+    }
+  }
+}
+
 /* ---------- Gọi Open-Meteo (miễn phí, không key, có CORS) ---------- */
 
 // Mã thời tiết WMO + ngày/đêm → chế độ trời của bản đồ.
@@ -4154,23 +4432,70 @@ function classifyWeather(code, isDay) {
   return { mode: "clear", desc: "Trời quang", icon: "☀️" };
 }
 
+// Cắt ra 24 giờ gần nhất tính tới giờ hiện tại. Open-Meteo trả cả dự báo
+// tương lai nên phải tìm đúng mốc "bây giờ" rồi lùi lại — lấy 24 phần tử
+// cuối mảng là ăn phải số liệu của ngày mai, mà số liệu ngày mai thì chưa
+// xảy ra nên đưa vào trung bình 24 giờ là sai hẳn.
+//
+// Không dùng indexOf: nếu mốc hiện tại vì lý do nào đó không có trong mảng
+// thì indexOf trả -1 và ta lại rơi vào đúng cái bẫy dự báo tương lai. Thay
+// vào đó quét lấy mốc cuối cùng không vượt quá hiện tại — cách này đúng cả
+// khi khớp chính xác lẫn khi lệch.
+function hourIndexAt(times, nowIso) {
+  if (!times.length) return -1;
+  const mark = nowIso || new Date().toISOString().slice(0, 13);
+  let found = -1;
+  for (let i = 0; i < times.length; i += 1) {
+    if (times[i] <= mark) found = i;
+    else break;
+  }
+  return found >= 0 ? found : 0;
+}
+
+function last24h(hourly, key, nowIndex) {
+  const values = hourly?.[key] || [];
+  return values
+    .slice(Math.max(0, nowIndex - 23), nowIndex + 1)
+    .map((v) => (v == null ? NaN : Number(v)));
+}
+
 async function fetchLiveWeather() {
   const base = "latitude=21.03&longitude=105.85&timezone=Asia%2FBangkok";
+  const pollutants = "pm2_5,pm10,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone";
   const [wx, aq] = await Promise.all([
     fetch(`https://api.open-meteo.com/v1/forecast?${base}&current=temperature_2m,relative_humidity_2m,weather_code,is_day,wind_speed_10m`).then((r) => r.json()),
-    fetch(`https://air-quality-api.open-meteo.com/v1/air-quality?${base}&current=us_aqi,pm2_5`)
+    fetch(`https://air-quality-api.open-meteo.com/v1/air-quality?${base}&past_days=1&current=pm2_5,us_aqi&hourly=${pollutants}`)
       .then((r) => r.json())
       .catch(() => null),
   ]);
   const cur = wx?.current;
   if (!cur) return null;
   const cls = classifyWeather(Number(cur.weather_code ?? 0), cur.is_day === 1);
+
+  // Tự tính VN_AQI theo Quyết định 1459 thay vì dùng us_aqi có sẵn.
+  let air = null;
+  if (aq?.hourly?.time?.length) {
+    const at = hourIndexAt(aq.hourly.time, aq?.current?.time);
+    air = vnAqiDaily({
+      pm25: last24h(aq.hourly, "pm2_5", at),
+      pm10: last24h(aq.hourly, "pm10", at),
+      co: last24h(aq.hourly, "carbon_monoxide", at),
+      no2: last24h(aq.hourly, "nitrogen_dioxide", at),
+      so2: last24h(aq.hourly, "sulphur_dioxide", at),
+      o3: last24h(aq.hourly, "ozone", at),
+    });
+  }
+
   return {
     ...cls,
     temp: Math.round(cur.temperature_2m),
     humidity: Math.round(cur.relative_humidity_2m ?? NaN),
     wind: Math.round(cur.wind_speed_10m ?? NaN),
-    aqi: aq?.current?.us_aqi ?? null,
+    aqi: air?.aqi ?? null,
+    aqiDriver: air?.driver ?? null,
+    pm25Now: aq?.current?.pm2_5 ?? null,
+    pm25Avg: air?.pm25Avg ?? null,
+    usAqi: aq?.current?.us_aqi ?? null,
   };
 }
 
@@ -4354,6 +4679,17 @@ const STRINGS = {
     wxHumidity: "Độ ẩm {v}%",
     wxWind: "Gió {v} km/h",
     wxSource: "Nguồn: Open-Meteo · tự làm mới mỗi 15 phút",
+    airTitle: "Không khí Hà Nội hôm nay",
+    airWhat: "VN_AQI ngày · Quyết định 1459/QĐ-TCMT",
+    airNone: "Chưa lấy được số liệu không khí. Thử lại khi mạng ổn hơn.",
+    airDriver: "Thông số quyết định chỉ số hôm nay: {p}",
+    airPm: "PM2.5 trung bình 24 giờ {avg} µg/m³ · hiện tại {now} µg/m³",
+    airEffect: "Ảnh hưởng tới sức khoẻ",
+    airNormal: "Khuyến nghị cho người bình thường",
+    airSensitive: "Khuyến nghị cho nhóm nhạy cảm",
+    airWho: "Nhóm nhạy cảm: người già, trẻ em, người mắc bệnh hô hấp hoặc tim mạch.",
+    airVsUs: "Cùng lúc này thang AQI của Mỹ cho {us}, thang Việt Nam cho {vn}. Hai thang dùng mốc nồng độ khác nhau nên số khác nhau là bình thường — bản đồ hiện số Việt Nam vì đó là thang dùng trong các bản tin trong nước.",
+    airEnNote: "Bản tiếng Anh chỉ là dịch tham khảo. Bản tiếng Việt trong quyết định mới là bản gốc.",
     mapReal: "Bản đồ thật",
     mapRealTitle: "Xem trên bản đồ đường phố thật — đủ từng ngõ ngách (phím M)",
     map3d: "Bản đồ 3D",
@@ -4499,6 +4835,17 @@ const STRINGS = {
     wxHumidity: "Humidity {v}%",
     wxWind: "Wind {v} km/h",
     wxSource: "Source: Open-Meteo · refreshes every 15 min",
+    airTitle: "Hanoi air today",
+    airWhat: "Daily VN_AQI · Decision 1459/QĐ-TCMT",
+    airNone: "Could not fetch air data. Try again on a better connection.",
+    airDriver: "Today's index is driven by: {p}",
+    airPm: "PM2.5 24-hour mean {avg} µg/m³ · now {now} µg/m³",
+    airEffect: "Effect on health",
+    airNormal: "Advice for the general public",
+    airSensitive: "Advice for sensitive groups",
+    airWho: "Sensitive groups: the elderly, children, and people with respiratory or heart conditions.",
+    airVsUs: "Right now the US scale reads {us} and the Vietnamese scale reads {vn}. The two use different concentration breakpoints, so a gap is normal — this map shows the Vietnamese figure because that is the scale used in domestic reporting.",
+    airEnNote: "This English text is an unofficial translation. The Vietnamese wording in the decision is authoritative.",
     mapReal: "Street map",
     mapRealTitle: "Switch to the real street map — every lane and alley (press M)",
     map3d: "3D map",
@@ -5759,6 +6106,23 @@ const SOURCES = [
     url: "https://www.geoboundaries.org/countryDownloads.html",
   },
   {
+    id: "qd-1459-2019",
+    group: "law",
+    kind: "Quyết định",
+    kindEn: "Decision",
+    ref: "Quyết định 1459/QĐ-TCMT",
+    title: "Hướng dẫn kỹ thuật tính toán và công bố chỉ số chất lượng không khí Việt Nam (VN_AQI)",
+    titleEn: "Technical guidance for calculating and publishing Vietnam's Air Quality Index (VN_AQI)",
+    body: "Tổng cục Môi trường, Bộ Tài nguyên và Môi trường",
+    bodyEn: "Vietnam Environment Administration, Ministry of Natural Resources and Environment",
+    signed: "2019-11-12",
+    uses: "Bảng BPi, công thức nội suy, sáu mức chất lượng kèm mã màu RGB, và toàn bộ khuyến cáo sức khoẻ trong bảng Không khí hôm nay.",
+    usesEn: "The BPi table, the interpolation formula, the six quality bands with their official RGB codes, and every health recommendation in the air quality sheet.",
+    note: "Bản đồ tính AQI NGÀY: bụi lấy trung bình 24 giờ, khí lấy giá trị 1 giờ lớn nhất trong ngày, đúng như mục 2.2.2 của quyết định. Không tính AQI giờ vì hệ số Nowcast trong văn bản in dưới dạng công thức ảnh, không chép lại chắc chắn được — thà đúng một chỉ số còn hơn đoán hai. Nồng độ đầu vào lấy từ Open-Meteo chứ không phải trạm quan trắc nhà nước, nên đây là ước lượng, không phải số liệu chính thức.",
+    noteEn: "The map computes the DAILY index: 24-hour means for particulates, the day's highest hourly value for gases, exactly as section 2.2.2 specifies. It does not compute the hourly index, because the decision prints the Nowcast weighting as an image formula we could not transcribe with confidence — better one index right than two guessed. Concentrations come from Open-Meteo, not state monitoring stations, so this is an estimate rather than an official reading.",
+    url: "https://cem.gov.vn/storage/news_file_attach/QD%201459%20TCMT%20ngay%2012.11.2019%20AQI.pdf",
+  },
+  {
     id: "osm",
     group: "data",
     kind: "Dữ liệu mở",
@@ -5796,8 +6160,8 @@ const SOURCES = [
     titleEn: "Live Hanoi weather and air quality",
     body: "Open-Meteo · miễn phí, không cần API key",
     bodyEn: "Open-Meteo · free, no API key",
-    uses: "Huy hiệu góc phải trên, và bầu trời – sương – mưa – đèn của cảnh 3D. Tự làm mới mỗi 15 phút.",
-    usesEn: "The top-right badge, plus the sky, fog, rain and lights of the 3D scene. Refreshes every 15 minutes.",
+    uses: "Huy hiệu góc phải trên, bầu trời – sương – mưa – đèn của cảnh 3D, và nồng độ sáu chất ô nhiễm để tính VN_AQI. Tự làm mới mỗi 15 phút.",
+    usesEn: "The top-right badge, the sky, fog, rain and lights of the 3D scene, and the six pollutant concentrations behind the VN_AQI figure. Refreshes every 15 minutes.",
     url: "https://open-meteo.com",
   },
 ];
@@ -5818,6 +6182,13 @@ const SOURCE_GAPS = [
     why: "Nghị quyết nêu 9 phường nhưng vùng thí điểm chỉ là một số khu vực trong đó. Bản đồ vẽ ranh giới phường để bạn biết đại khái ở đâu, không dùng thay bản đồ cấm đường.",
     whyEn: "The resolution names nine wards, but the pilot covers only parts of them. The map draws ward outlines so you know roughly where, not as a substitute for an official restriction map.",
     ref: "nq-57-2025",
+  },
+  {
+    what: "Số liệu quan trắc chính thức của trạm nhà nước",
+    whatEn: "Official readings from state monitoring stations",
+    why: "Chỉ số VN_AQI trên bản đồ tính từ nồng độ mô hình hoá của Open-Meteo, không phải từ trạm quan trắc của Bộ Nông nghiệp và Môi trường hay của thành phố. Cách tính thì theo đúng Quyết định 1459, nhưng đầu vào là ước lượng. Cần con số chính thức thì xem bản tin của cơ quan quản lý.",
+    whyEn: "The VN_AQI shown here is computed from Open-Meteo's modelled concentrations, not from the ministry's or the city's monitoring stations. The method follows Decision 1459 exactly, but the input is an estimate. For official figures, check the regulator's bulletins.",
+    ref: "qd-1459-2019",
   },
 ];
 

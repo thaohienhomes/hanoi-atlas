@@ -96,6 +96,18 @@ Có một chỗ vênh phải nói thẳng, và app cũng nói thẳng ngay trong
 
 Số phường xã mỗi vùng: Nam sông Hồng 55 · phía Đông 8 · phía Bắc 14 · phía Tây 29 · phía Nam 20 (tổng 126).
 
+## Không khí hôm nay / Air quality
+
+Chạm vào huy hiệu thời tiết ở góc phải trên (hoặc mở `#/khong-khi`) là ra bảng chất lượng không khí: chỉ số, mức, và **khuyến cáo sức khoẻ chính thức** cho người bình thường lẫn nhóm nhạy cảm.
+
+Điểm khác biệt so với hầu hết app thời tiết: bản đồ **tự tính VN_AQI theo Quyết định 1459/QĐ-TCMT**, không lấy con số US AQI có sẵn.
+
+- Hai thang dùng mốc nồng độ khác nhau nên cho hai con số khác hẳn. Có thời điểm Hà Nội là **93 theo thang Mỹ nhưng 64 theo thang Việt Nam**. Người Việt đọc báo, xem bản tin, nhìn bảng điện tử ngoài đường đều thấy VN_AQI — hiện số Mỹ mà chỉ đề "AQI" là đánh lừa người đọc, dù không cố ý.
+- Cách tính: bụi lấy **trung bình 24 giờ**, khí lấy **giá trị 1 giờ lớn nhất trong ngày**, O₃ lấy cả 1 giờ và 8 giờ lớn nhất, rồi nội suy tuyến tính theo bảng BPi và lấy giá trị lớn nhất — đúng mục 2.2.2 của quyết định. Bảng còn cho biết **thông số nào đang quyết định chỉ số**.
+- Màu sáu mức lấy đúng **mã RGB trong Bảng 1** của quyết định, để trùng với bản tin chính thức chứ không phải màu tự chọn cho đẹp.
+- **Không tính AQI giờ**, vì hệ số Nowcast trong văn bản in dưới dạng công thức ảnh, không chép lại chắc chắn được. Thà đúng một chỉ số còn hơn đoán hai.
+- Nồng độ đầu vào lấy từ Open-Meteo, **không phải trạm quan trắc nhà nước** — đây là ước lượng, và điều đó được ghi thẳng trong mục "cố tình để trống" của bảng Nguồn.
+
 ## Nguồn & đối chiếu / Sources and citations
 
 Nguyên tắc của dự án: **điều gì bản đồ khẳng định mà dựa vào văn bản nhà nước thì phải dẫn được về văn bản gốc.** Bảng **Nguồn & đối chiếu** (link ở chân thanh bên, chạm vào huy hiệu thời tiết, hoặc mở thẳng `#/nguon`) liệt kê từng văn bản kèm số hiệu, cơ quan ban hành, người ký, ngày ký, ngày hiệu lực, văn bản bị thay thế, dòng "Bản đồ dùng để…", và nút **Mở văn bản gốc ↗** trỏ về cổng thông tin nhà nước để người dùng tự đọc.
@@ -105,7 +117,7 @@ Nguyên tắc của dự án: **điều gì bản đồ khẳng định mà dự
 - `SOURCE_GAPS` ghi những chỗ **cố tình để trống**. Ví dụ: Nghị quyết 57/2025/NQ-HĐND nêu loại phương tiện và các mốc thời gian nhưng **không ấn định khung giờ cấm** — chi tiết chờ đề án của UBND thành phố. Bản đồ sẽ không hiện giờ nào cho tới khi có văn bản, vì một khung giờ bịa ra là có người đi nhầm đường thật.
 - `registerLayer(layerId, sourceIds)` bắt mọi lớp dữ liệu pháp lý khai nguồn trước khi được vẽ; thiếu là cảnh báo ngay ở console.
 
-Văn bản đang tham chiếu: Luật Thủ đô số 39/2024/QH15, Nghị quyết 57/2025/NQ-HĐND, Chỉ thị 20/CT-TTg, Nghị quyết 1656/NQ-UBTVQH15, Quyết định 1668/QĐ-TTg. Dữ liệu mở: OpenStreetMap (ODbL), OpenFreeMap, Open-Meteo, geoBoundaries (CC BY 4.0).
+Văn bản đang tham chiếu: Luật Thủ đô số 39/2024/QH15, Nghị quyết 57/2025/NQ-HĐND, Chỉ thị 20/CT-TTg, Nghị quyết 1656/NQ-UBTVQH15, Quyết định 1668/QĐ-TTg, Quyết định 1459/QĐ-TCMT. Dữ liệu mở: OpenStreetMap (ODbL), OpenFreeMap, Open-Meteo, geoBoundaries (CC BY 4.0).
 
 ## Dữ liệu thời gian thực / Live data
 

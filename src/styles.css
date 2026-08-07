@@ -2040,3 +2040,138 @@ body.is-map .map-layers {
   padding-left: 14px;
   border-left: 2px dashed oklch(50% 0.02 258 / 0.5);
 }
+
+/* ==========================================================================
+   BẢNG KHÔNG KHÍ HÔM NAY · AIR QUALITY SHEET
+   Chạm vào huy hiệu thời tiết là mở ra. Màu của khối số lấy đúng mã RGB
+   trong Bảng 1 của Quyết định 1459, để trùng với bản tin và bảng điện tử
+   ngoài đường chứ không phải màu tự chọn cho đẹp.
+   ========================================================================== */
+
+.air-now {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 14px;
+  align-items: center;
+  margin-top: var(--space-md);
+  padding: 14px 16px;
+  border-left: 6px solid var(--band);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklch, var(--band) 12%, var(--color-paper-2));
+}
+
+.air-now b {
+  grid-row: span 2;
+  font-size: 42px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  letter-spacing: -0.03em;
+}
+
+.air-now span {
+  align-self: end;
+  color: var(--color-ink);
+  font-size: var(--fs-md);
+  font-weight: 640;
+}
+
+.air-now small {
+  align-self: start;
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+}
+
+.air-driver,
+.air-pm {
+  margin: 8px 0 0;
+  color: var(--color-ink-2);
+  font-size: var(--fs-sm);
+}
+
+.air-pm {
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Thang sáu mức, mức đang xảy ra được nhấn lên. */
+.air-scale {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.air-scale__item {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--color-paper-2);
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+  opacity: 0.6;
+}
+
+.air-scale__item i {
+  width: 9px;
+  height: 9px;
+  border: 1px solid oklch(22% 0.018 80 / 0.2);
+  border-radius: 2px;
+}
+
+.air-scale__item b {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.air-scale__item.is-now {
+  border-color: var(--color-ink-2);
+  color: var(--color-ink);
+  font-weight: 600;
+  opacity: 1;
+}
+
+.air-block {
+  margin-top: 12px;
+  padding: 11px 13px;
+  border-radius: var(--radius-sm);
+  background: var(--color-paper-2);
+}
+
+.air-block h3 {
+  margin: 0 0 4px;
+  font-size: var(--fs-sm);
+}
+
+.air-block p {
+  margin: 0;
+  color: var(--color-ink-2);
+  font-size: var(--fs-sm);
+}
+
+/* Nhóm nhạy cảm là nhóm chịu hậu quả trước và nặng nhất, nên tách màu ra. */
+.air-block--sensitive {
+  border-left: 3px solid var(--color-warning);
+  background: oklch(68% 0.13 78 / 0.1);
+}
+
+.air-block small {
+  display: block;
+  margin-top: 6px;
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+}
+
+.src-sheet__gapnote {
+  margin: 10px 0 0;
+  padding: 9px 12px;
+  border: 1px dashed oklch(50% 0.02 258 / 0.45);
+  border-radius: var(--radius-xs);
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}

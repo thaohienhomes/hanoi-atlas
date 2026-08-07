@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Chợ Đồng Xuân">
-  <rect width="64" height="64" rx="14" fill="#1fa99b"/>
+  <rect width="64" height="64" rx="14" fill="#0076a2"/>
   <g fill="#ffffff">
     <path d="M11 20h42v6a5.2 5.2 0 0 1-10.4 0 5.2 5.2 0 0 1-10.5 0 5.2 5.2 0 0 1-10.5 0A5.2 5.2 0 0 1 11 26Z"/>
     <path d="M14 31v20h14V38h8v13h14V31a8 8 0 0 1-6-1.4 8.4 8.4 0 0 1-10.4 0 8.4 8.4 0 0 1-10.5 0A8 8 0 0 1 14 31Z"/></g>

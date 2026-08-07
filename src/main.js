@@ -21,8 +21,12 @@ import {
   inWater,
 } from "./geo.js";
 
+/* ---------- Hệ toạ độ ---------- */
+
+// Gốc đặt ở Hồ Gươm. Hệ số kinh tuyến bị nén lại theo cos(21°) — vĩ độ của
+// Hà Nội — nếu không thì thành phố sẽ bị kéo ngang ra méo hẳn.
 const CENTER = { lat: 21.033, lng: 105.833 };
-const SCALE = { lat: 1180, lng: 1101 }; // lng compressed by cos(21°)
+const SCALE = { lat: 1180, lng: 1101 };
 const AREA_BY_ID = Object.fromEntries(AREAS.map((area) => [area.id, area]));
 
 const state = {
@@ -31,6 +35,8 @@ const state = {
   labelsMode: window.matchMedia("(max-width: 54rem)").matches ? "key" : "all",
   flight: null,
 };
+
+/* ---------- Các nút bấm và khung chứa trên trang ---------- */
 
 const canvas = document.querySelector("#scene");
 const labelsLayer = document.querySelector("#labelsLayer");
@@ -41,40 +47,53 @@ const searchInput = document.querySelector("#companySearch");
 const searchResults = document.querySelector("#searchResults");
 const searchTrigger = document.querySelector("#searchTrigger");
 const searchModal = document.querySelector("#searchModal");
-let searchActiveIndex = -1;
 const pinLegend = document.querySelector("#pinLegend");
+let searchActiveIndex = -1;
 
-// Active-area description, moved under the selected row in the rail.
+// Dòng mô tả khu vực, chèn xuống ngay dưới mục đang chọn trong thanh bên.
 const areaDescEl = document.createElement("p");
 areaDescEl.className = "area-desc";
 
-const HORIZON = 0xcfe6f2; // pale sky at the horizon; fog fades toward this
+/* ---------- Bầu trời và sương ---------- */
+
+// Trời Hà Nội hiếm khi xanh thẫm. Độ ẩm cao quanh năm cộng bụi mịn làm bầu
+// trời gần như lúc nào cũng đục sữa, nhất là mùa nồm và mùa đốt rơm. Nên
+// dải màu này nhạt và ngả ấm hơn một bầu trời ôn đới, và sương mù phía chân
+// trời cũng dày hơn — nhìn xa là thành phố tan ngay vào mù.
+const HORIZON = 0xd6e6ee;
+const SKY_STOPS = [
+  [0, "#7fb0d4"],
+  [0.42, "#a8cbe0"],
+  [0.78, "#d6e6ee"],
+  [1, "#e9f1f3"],
+];
 
 function makeSkyTexture() {
-  const c = document.createElement("canvas");
-  c.width = 16;
-  c.height = 256;
-  const ctx = c.getContext("2d");
+  const canvas = document.createElement("canvas");
+  canvas.width = 16;
+  canvas.height = 256;
+  const ctx = canvas.getContext("2d");
   const grad = ctx.createLinearGradient(0, 0, 0, 256);
-  grad.addColorStop(0, "#6fa8d6"); // zenith
-  grad.addColorStop(0.45, "#9cc7e6");
-  grad.addColorStop(0.8, "#cfe6f2"); // horizon
-  grad.addColorStop(1, "#e4f0f6");
+  for (const [stop, color] of SKY_STOPS) grad.addColorStop(stop, color);
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, 16, 256);
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
 }
 
 const scene = new THREE.Scene();
 scene.background = makeSkyTexture();
 scene.fog = new THREE.FogExp2(HORIZON, 0.0052);
 
-// Phones get a lighter GPU budget: capped pixel ratio and a smaller shadow map.
+/* ---------- Máy quay và bộ dựng hình ---------- */
+
+// Điện thoại được cấp ngân sách GPU nhẹ hơn: chặn tỉ lệ điểm ảnh và thu nhỏ
+// bản đồ bóng, kẻo máy nóng ran mà khung hình vẫn giật.
 const smallScreen = window.matchMedia("(max-width: 54rem)").matches;
 
 const camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.1, 500);
+
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, smallScreen ? 1.5 : 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -89,6 +108,8 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.07;
 controls.minDistance = 18;
 controls.maxDistance = 140;
+// Chặn không cho hạ máy xuống dưới đường chân trời, kẻo nhìn thấy mặt dưới
+// của mặt đất.
 controls.maxPolarAngle = Math.PI * 0.47;
 controls.screenSpacePanning = false;
 
@@ -97,224 +118,170 @@ const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 const UP = new THREE.Vector3(0, 1, 0);
 
+/* ---------- Sổ ghi những gì đã dựng ---------- */
+
 const markerMeshes = [];
 const startupMarkers = new Map();
 const labelElements = new Map();
 const labelDims = new Map();
 const landmarkLabelElements = [];
 const waterSurfaces = [];
+
+// Các đoàn phương tiện, mỗi đoàn một vòng cập nhật riêng mỗi khung hình.
 const vehicleFleet = [];
 const ferryFleet = [];
 const planeFleet = [];
 const subwayFleet = [];
 const birdFleet = [];
-let birdMesh = null;
-const sidewalkPlates = []; // block-plate centers, filled by createBuildings
 const pedFleet = [];
+let birdMesh = null;
 let pedMesh = null;
 let pedRect = null;
-const treeBuffer = []; // { x, z, type: "conifer"|"round", scale, rot, colorIndex }
-let hoverCandidate = null;
-let pointerDown = null; // { x, y, item } captured on pointerdown to tell clicks from drags
 
-// Greenery palette: a spread of Hanoi park greens (xà cừ, sấu, bằng lăng...)
-// for per-instance tree color.
+// Tâm các ô phố, do createBuildings điền vào; người đi bộ men theo mép chúng.
+const sidewalkPlates = [];
+// Hàng đợi cây: { x, z, type: "conifer" | "round", scale, rot, colorIndex }
+const treeBuffer = [];
+
+let hoverCandidate = null;
+// Ghi lại lúc đặt ngón tay xuống, để phân biệt cú chạm chọn địa điểm với cú
+// kéo xoay bản đồ: { x, y, item }
+let pointerDown = null;
+
+// Sắc lá cây Hà Nội: xà cừ, sấu, bằng lăng, phượng — mỗi cây bốc một sắc.
 const GREEN_PALETTE = [
   0x3d6b39, 0x4a7d45, 0x557f42, 0x5e8a4c, 0x6d9a58, 0x7fa866, 0x4f7237,
-].map((c) => new THREE.Color(c));
+].map((hex) => new THREE.Color(hex));
 
+// Bảng màu của cảnh 3D, lấy đúng ba sắc nhóm trong tokens.css để pin trên
+// bản đồ và chấm trong chú thích không bao giờ lệch nhau. Phần còn lại lấy
+// từ vật liệu thật của Hà Nội: vữa xám ngả vàng, ngói, nhựa đường bạc nắng.
 const colors = {
-  accent: new THREE.Color(0x2664ff),
-  cyan: new THREE.Color(0x33d6c7),
-  green: new THREE.Color(0x32bd7b),
-  yellow: new THREE.Color(0xffcc4d),
-  red: new THREE.Color(0xe54c42),
-  graphite: new THREE.Color(0x19202b),
-  land: new THREE.Color(0xd2cec2),
-  land2: new THREE.Color(0xc7c2b2),
-  road: new THREE.Color(0x2b2f38),
-  building: new THREE.Color(0xd9d6ca),
-  buildingDark: new THREE.Color(0x8e9899),
+  accent: new THREE.Color(0x006956),
+  food: new THREE.Color(0xd69727),
+  sight: new THREE.Color(0x0085b5),
+  home: new THREE.Color(0xb25634),
+  red: new THREE.Color(0xc9302d),
+  graphite: new THREE.Color(0x201c15),
+  land: new THREE.Color(0xd4cfc0),
+  land2: new THREE.Color(0xc8c2ae),
+  road: new THREE.Color(0x38352e),
+  building: new THREE.Color(0xdbd7c9),
+  buildingDark: new THREE.Color(0x94958b),
 };
 
-// Near-white concrete mottle multiplied over the land fills: block-scale
-// tonal blotches plus fine speckle, so the ground stops reading as one
-// flat sheet of beige. Generated once; zero per-frame cost.
-function makeGroundTexture() {
-  const c = document.createElement("canvas");
-  c.width = 512;
-  c.height = 512;
-  const ctx = c.getContext("2d");
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, 512, 512);
-  const rand = seededRandom(4242);
-  for (let i = 0; i < 70; i += 1) {
-    const r = 36 + rand() * 96;
-    const x = rand() * 512;
-    const y = rand() * 512;
-    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-    const warm = rand() > 0.5;
-    g.addColorStop(0, warm ? "rgba(150, 138, 116, 0.05)" : "rgba(96, 104, 116, 0.05)");
-    g.addColorStop(1, "rgba(120, 120, 120, 0)");
-    ctx.fillStyle = g;
-    ctx.fillRect(x - r, y - r, r * 2, r * 2);
+// Nền đất trần trông rất giả nếu để một mảng bê tông phẳng lì. Lớp vân này
+// nhân lên trên các mảng nền để phá sự phẳng đó: nhiễu giá trị hai tầng
+// (tầng thô tạo mảng loang cỡ một khu phố, tầng mịn tạo lấm tấm), rồi rắc
+// thêm ít hạt sạn. Sinh một lần lúc khởi động, chạy khung hình không tốn gì.
+function valueNoiseCanvas(size, cells, seed, warm) {
+  const rand = seededRandom(seed);
+  const grid = Array.from({ length: cells + 1 }, () => Array.from({ length: cells + 1 }, () => rand()));
+  // Nối viền để vân lặp được không thấy đường ghép.
+  for (let i = 0; i <= cells; i += 1) {
+    grid[i][cells] = grid[i][0];
+    grid[cells][i] = grid[0][i];
   }
-  for (let i = 0; i < 2400; i += 1) {
-    ctx.fillStyle = `rgba(72, 78, 88, ${0.012 + rand() * 0.03})`;
-    const s = 1 + rand() * 2.4;
-    ctx.fillRect(rand() * 512, rand() * 512, s, s);
+  const smooth = (t) => t * t * (3 - 2 * t);
+  const step = size / cells;
+  const data = new Float32Array(size * size);
+  for (let y = 0; y < size; y += 1) {
+    const gy = Math.floor(y / step);
+    const fy = smooth((y - gy * step) / step);
+    for (let x = 0; x < size; x += 1) {
+      const gx = Math.floor(x / step);
+      const fx = smooth((x - gx * step) / step);
+      const top = grid[gy][gx] * (1 - fx) + grid[gy][gx + 1] * fx;
+      const bottom = grid[gy + 1][gx] * (1 - fx) + grid[gy + 1][gx + 1] * fx;
+      data[y * size + x] = top * (1 - fy) + bottom * fy;
+    }
   }
-  const tex = new THREE.CanvasTexture(c);
-  tex.wrapS = THREE.RepeatWrapping;
-  tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(0.22, 0.22);
-  tex.anisotropy = 4;
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
+  return { data, warm };
 }
+
+function makeGroundTexture() {
+  const SIZE = 512;
+  const canvas = document.createElement("canvas");
+  canvas.width = SIZE;
+  canvas.height = SIZE;
+  const ctx = canvas.getContext("2d");
+  const image = ctx.createImageData(SIZE, SIZE);
+  const coarse = valueNoiseCanvas(SIZE, 8, 20260806, true);
+  const fine = valueNoiseCanvas(SIZE, 46, 19541010, false);
+  const grit = seededRandom(1010);
+  for (let i = 0; i < SIZE * SIZE; i += 1) {
+    // Quanh mức trắng: vân chỉ được làm tối đi tối đa vài phần trăm, nếu
+    // không thì màu vật liệu bên dưới bị lệch hẳn.
+    const shade = 1 - (coarse.data[i] - 0.5) * 0.075 - (fine.data[i] - 0.5) * 0.05;
+    const speck = grit() < 0.006 ? 0.9 + grit() * 0.06 : 1;
+    const v = shade * speck;
+    const p = i * 4;
+    // Mảng loang ngả ấm một chút ở chỗ sáng, ngả xám ở chỗ tối — giống vệt
+    // nắng mưa trên vỉa hè hơn là một lớp xám đều.
+    image.data[p] = Math.min(255, Math.round(255 * v * 1.008));
+    image.data[p + 1] = Math.min(255, Math.round(255 * v));
+    image.data[p + 2] = Math.min(255, Math.round(255 * v * 0.986));
+    image.data[p + 3] = 255;
+  }
+  ctx.putImageData(image, 0, 0);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(0.22, 0.22);
+  texture.anisotropy = 4;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
 const groundTexture = makeGroundTexture();
 
+// Vật liệu dùng lại cho cả cảnh, gom theo thứ bậc: mặt đất trước, rồi thứ
+// đặt trên đất, rồi thứ chuyển động. Bảng này từng có bảy vật liệu không
+// chỗ nào dùng tới — đã bỏ.
+const surface = (color, roughness, extra) =>
+  new THREE.MeshStandardMaterial({ color, roughness, side: THREE.DoubleSide, ...extra });
+const solid = (color, roughness, extra) =>
+  new THREE.MeshStandardMaterial({ color, roughness, ...extra });
+
 const materials = {
-  water: new THREE.MeshStandardMaterial({
-    color: 0x2a6488,
-    roughness: 0.4,
-    metalness: 0.18,
-  }),
-  land: new THREE.MeshStandardMaterial({
-    color: colors.land,
-    map: groundTexture,
-    roughness: 0.82,
-    side: THREE.DoubleSide,
-  }),
-  // Manhattan's ground plane IS the street surface; blocks sit on it as
-  // raised sidewalk plates, so streets need no line meshes at all.
-  asphalt: new THREE.MeshStandardMaterial({
-    color: 0x7a7e85,
-    map: groundTexture,
-    roughness: 0.96,
-    side: THREE.DoubleSide,
-  }),
-  landAlt: new THREE.MeshStandardMaterial({
-    color: colors.land2,
-    map: groundTexture,
-    roughness: 0.9,
-    side: THREE.DoubleSide,
-  }),
-  park: new THREE.MeshStandardMaterial({
-    color: 0x679c58,
-    roughness: 0.9,
-    side: THREE.DoubleSide,
-  }),
-  parkLight: new THREE.MeshStandardMaterial({
-    color: 0x86ad6c,
-    roughness: 0.92,
-    side: THREE.DoubleSide,
-  }),
-  parkDark: new THREE.MeshStandardMaterial({
-    color: 0x4c7847,
-    roughness: 0.95,
-    side: THREE.DoubleSide,
-  }),
-  path: new THREE.MeshStandardMaterial({
-    color: 0xd8cfaa,
-    roughness: 0.86,
-  }),
-  pond: new THREE.MeshStandardMaterial({
-    color: 0x467f9b,
-    roughness: 0.46,
-    metalness: 0.04,
-    side: THREE.DoubleSide,
-  }),
-  road: new THREE.MeshStandardMaterial({
-    color: 0x5b6068,
-    roughness: 0.82,
-  }),
-  street: new THREE.MeshStandardMaterial({
-    color: 0x767b82,
-    roughness: 0.86,
-  }),
-  rail: new THREE.MeshStandardMaterial({
-    color: 0xb7c0c6,
-    roughness: 0.6,
-  }),
-  bridge: new THREE.MeshStandardMaterial({
-    color: 0xd6c9a8,
-    roughness: 0.65,
-  }),
-  seawall: new THREE.MeshStandardMaterial({
-    color: 0xcfc6a8,
-    roughness: 0.8,
-  }),
-  building: new THREE.MeshStandardMaterial({
-    color: colors.building,
-    roughness: 0.72,
-  }),
-  roof: new THREE.MeshStandardMaterial({
-    color: 0x657071,
-    roughness: 0.7,
-  }),
-  roofColored: new THREE.MeshStandardMaterial({
-    color: 0xffffff,
-    roughness: 0.74,
-  }),
-  treeLeaf: new THREE.MeshStandardMaterial({
-    color: 0xffffff,
-    roughness: 0.92,
-    flatShading: true,
-  }),
-  treeTrunk: new THREE.MeshStandardMaterial({
-    color: 0x6b4f33,
-    roughness: 0.9,
-  }),
-  hill: new THREE.MeshStandardMaterial({
-    color: 0x63904f,
-    roughness: 0.96,
-    flatShading: true,
-  }),
-  glass: new THREE.MeshStandardMaterial({
-    color: 0x8fb4bd,
-    roughness: 0.26,
-    metalness: 0.1,
-    transparent: true,
-    opacity: 0.9,
-  }),
-  landmark: new THREE.MeshStandardMaterial({
-    color: 0xcfc8b8,
-    roughness: 0.55,
-  }),
-  copper: new THREE.MeshStandardMaterial({
-    color: 0x5fac85,
-    roughness: 0.62,
-    metalness: 0.04,
-  }),
-  subway: new THREE.MeshStandardMaterial({
-    color: 0x169b62,
-    roughness: 0.44,
-    emissive: new THREE.Color(0x072b19),
-  }),
-  ghost: new THREE.MeshStandardMaterial({
-    color: 0xd8d4c9,
-    roughness: 0.95,
-  }),
-  ferry: new THREE.MeshStandardMaterial({
-    color: 0xf4f1e8,
-    roughness: 0.48,
-  }),
-  plane: new THREE.MeshStandardMaterial({
-    color: 0xf0f4f6,
-    roughness: 0.4,
-  }),
-  window: new THREE.MeshStandardMaterial({
-    color: 0x36495c,
-    roughness: 0.38,
-    metalness: 0.08,
-    emissive: new THREE.Color(0x07121b),
-  }),
-  context: new THREE.MeshStandardMaterial({
-    color: 0xe8b500,
-    roughness: 0.62,
-    emissive: new THREE.Color(0x211600),
-  }),
+  // --- mặt nước ---
+  // Ba loại nước, ba màu khác nhau, và khác nhau là có lý do:
+  //   river — sông Hồng, đúng nghĩa đen là sông màu hồng. Nước quanh năm đục
+  //           phù sa, ngả nâu đất. Vẽ xanh nước biển thì đẹp nhưng sai hẳn
+  //           với thứ ai đứng trên cầu Long Biên cũng nhìn thấy.
+  //   pond  — Hồ Tây, Hồ Gươm: nước tù, nhiều tảo, xanh lục. Hồ Gươm còn
+  //           được gọi là hồ Lục Thuỷ chính vì cái màu ấy.
+  //   water — mặt nước nền trải rộng ra ngoài khung hình, chỉ làm nền cho
+  //           thành phố tan vào sương. Giữ xanh nhạt, không phải sông.
+  water: solid(0x35637e, 0.42, { metalness: 0.16 }),
+  river: surface(0x8a7350, 0.44, { metalness: 0.22 }),
+  pond: surface(0x3f7f74, 0.46, { metalness: 0.04 }),
+
+  // --- mặt đất ---
+  asphalt: surface(0x7c7d7c, 0.95, { map: groundTexture }),
+  landAlt: surface(colors.land2, 0.9, { map: groundTexture }),
+  park: surface(0x5f9a52, 0.9),
+  parkLight: surface(0x82ab68, 0.92),
+  hill: solid(0x5d8b4b, 0.96, { flatShading: true }),
+
+  // --- kết cấu đặt trên đất ---
+  road: solid(colors.road, 0.84),
+  rail: solid(0xb4bcc0, 0.6),
+  bridge: solid(0xd3c5a4, 0.66),
+  seawall: solid(0xcdc3a4, 0.8),
+  building: solid(colors.building, 0.72),
+  roofColored: solid(0xffffff, 0.74),
+  window: solid(0x384a5a, 0.38, { metalness: 0.08, emissive: new THREE.Color(0x07121b) }),
+  glass: solid(0x8fb2bb, 0.26, { metalness: 0.1, transparent: true, opacity: 0.9 }),
+  landmark: solid(0xcdc6b5, 0.55),
+  copper: solid(0x5aa781, 0.62, { metalness: 0.04 }),
+  ghost: solid(colors.buildingDark, 0.95),
+  treeLeaf: solid(0xffffff, 0.92, { flatShading: true }),
+  treeTrunk: solid(0x67492e, 0.9),
+
+  // --- thứ chuyển động ---
+  ferry: solid(0xf2efe6, 0.48),
+  plane: solid(0xeef2f5, 0.4),
 };
 
 function project(lat, lng, y = 0) {
@@ -357,9 +324,9 @@ function areaItems(areaId) {
 }
 
 function stageColor(stage) {
-  if (stage === "Ẩm thực") return colors.yellow;
-  if (stage === "Du lịch") return colors.cyan;
-  if (stage === "BĐS") return colors.green;
+  if (stage === "Ẩm thực") return colors.food;
+  if (stage === "Du lịch") return colors.sight;
+  if (stage === "BĐS") return colors.home;
   return colors.accent;
 }
 
@@ -371,37 +338,55 @@ function stageTag(stage) {
   return "";
 }
 
+// Bộ sinh số giả ngẫu nhiên có hạt giống. Cả thành phố này dựng bằng thuật
+// toán chứ không đặt tay từng khối, nên bắt buộc phải tái lập được: cùng một
+// hạt giống thì lần nào mở trang cũng ra đúng thành phố ấy. Dùng sfc32 của
+// PractRand — chu kỳ dài, phân bố đều, gọn trong mấy dòng.
 function seededRandom(seed) {
-  let t = seed + 0x6d2b79f5;
+  let a = seed >>> 0;
+  let b = (seed ^ 0x9e3779b9) >>> 0;
+  let c = (seed ^ 0x85ebca6b) >>> 0;
+  let d = 1;
+  const step = () => {
+    const t = (((a + b) >>> 0) + d) >>> 0;
+    d = (d + 1) >>> 0;
+    a = b ^ (b >>> 9);
+    b = (c + (c << 3)) >>> 0;
+    c = ((c << 21) | (c >>> 11)) >>> 0;
+    c = (c + t) >>> 0;
+    return t >>> 0;
+  };
+  for (let i = 0; i < 12; i += 1) step();
   return function random() {
-    t += 0x6d2b79f5;
-    let r = Math.imul(t ^ (t >>> 15), 1 | t);
-    r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
-    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+    return step() / 4294967296;
   };
 }
 
+// Toạ độ địa lý → điểm trong cảnh. Gom riêng vì ba hàm dựng hình dưới đây
+// đều cần, và trước kia mỗi hàm tự lặp lại một vòng map giống hệt nhau.
+function toScenePoints(coords, y = 0) {
+  return coords.map(([lat, lng]) => project(lat, lng, y));
+}
+
 function makeShape(coords, material, y = 0, shadow = false, holes = []) {
-  const shape = new THREE.Shape();
-  coords.forEach(([lat, lng], index) => {
-    const p = project(lat, lng);
-    if (index === 0) shape.moveTo(p.x, p.z);
-    else shape.lineTo(p.x, p.z);
+  const outline = new THREE.Shape();
+  toScenePoints(coords).forEach((p, index) => {
+    if (index === 0) outline.moveTo(p.x, p.z);
+    else outline.lineTo(p.x, p.z);
   });
-  shape.closePath();
-  // Holes (the big lakes) punch through the landmass so the animated water
-  // plane below shows through as real water.
-  holes.forEach((holeCoords) => {
-    const path = new THREE.Path();
-    holeCoords.forEach(([lat, lng], index) => {
-      const p = project(lat, lng);
-      if (index === 0) path.moveTo(p.x, p.z);
-      else path.lineTo(p.x, p.z);
+  outline.closePath();
+  // Hồ lớn được khoét thủng hẳn qua mảng đất, để mặt nước động ở lớp dưới
+  // lộ lên thành nước thật chứ không phải một mảng xanh vẽ đè.
+  for (const holeCoords of holes) {
+    const hole = new THREE.Path();
+    toScenePoints(holeCoords).forEach((p, index) => {
+      if (index === 0) hole.moveTo(p.x, p.z);
+      else hole.lineTo(p.x, p.z);
     });
-    path.closePath();
-    shape.holes.push(path);
-  });
-  const geometry = new THREE.ShapeGeometry(shape);
+    hole.closePath();
+    outline.holes.push(hole);
+  }
+  const geometry = new THREE.ShapeGeometry(outline);
   geometry.rotateX(Math.PI / 2);
   const mesh = new THREE.Mesh(geometry, material);
   mesh.position.y = y;
@@ -410,72 +395,93 @@ function makeShape(coords, material, y = 0, shadow = false, holes = []) {
   return mesh;
 }
 
-function makeTube(coords, radius, material, y = 0.05, segments = 80) {
-  const points = coords.map(([lat, lng]) => project(lat, lng, y));
+// Ống bám theo một đường: dùng cho kè, ray, dây văng, mép đường. Nhận thẳng
+// điểm trong cảnh, nên hai hàm bọc dưới đây chỉ khác nhau ở khâu đổi toạ độ.
+function tubeThroughPoints(points, radius, material, segments) {
   const curve = new THREE.CatmullRomCurve3(points);
-  const geometry = new THREE.TubeGeometry(curve, segments, radius, 8, false);
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  scene.add(mesh);
-  return { mesh, points };
-}
-
-function makeCurveTube(points, radius, material, segments = 48) {
-  const curve = new THREE.CatmullRomCurve3(points);
-  const geometry = new THREE.TubeGeometry(curve, segments, radius, 8, false);
-  const mesh = new THREE.Mesh(geometry, material);
+  const mesh = new THREE.Mesh(
+    new THREE.TubeGeometry(curve, segments, radius, 8, false),
+    material,
+  );
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   scene.add(mesh);
   return mesh;
 }
 
+function makeTube(coords, radius, material, y = 0.05, segments = 80) {
+  const points = toScenePoints(coords, y);
+  return { mesh: tubeThroughPoints(points, radius, material, segments), points };
+}
+
+function makeCurveTube(points, radius, material, segments = 48) {
+  return tubeThroughPoints(points, radius, material, segments);
+}
+
+/* ---------- Ánh sáng ---------- */
+
+// Hà Nội ở vĩ độ 21° Bắc nên mặt trời lên rất cao, bóng đổ ngắn và gắt hơn
+// nhiều so với thành phố ôn đới. Góc nắng dưới đây dựng theo buổi chiều
+// tháng mười: chếch tây nam, đủ xiên để khối nhà có mặt sáng mặt tối.
+const SUN_AIM = { x: -4, z: -10 };
+const SUN_OFFSET = { x: -52, y: 46, z: 40 };
+// Khung đổ bóng phải trùm hết mặt bằng thành phố, khoảng x [-90, 80],
+// z [-77, 57]. Rộng quá thì bóng vỡ hạt, hẹp quá thì mất bóng ở rìa.
+const SHADOW_EXTENT = { x: 100, z: 95 };
+
 function createLights() {
-  const hemi = new THREE.HemisphereLight(0xdbefff, 0x4a4335, 2.75);
-  scene.add(hemi);
+  scene.add(new THREE.HemisphereLight(0xdcefff, 0x4a4335, 2.75));
 
   const sun = new THREE.DirectionalLight(0xffedc9, 3.45);
+  sun.target.position.set(SUN_AIM.x, 0, SUN_AIM.z);
+  sun.position.set(SUN_AIM.x + SUN_OFFSET.x, SUN_OFFSET.y, SUN_AIM.z + SUN_OFFSET.z);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(smallScreen ? 1024 : 2048, smallScreen ? 1024 : 2048);
-  sun.shadow.camera.near = 2;
-  sun.shadow.camera.far = 220;
-  // The city footprint spans roughly x [-90, 80], z [-77, 57], so the shadow
-  // box is sized to cover the whole frame.
-  // The bias pair removes acne/peter-panning on the box facades.
-  sun.shadow.camera.left = -100;
-  sun.shadow.camera.right = 100;
-  sun.shadow.camera.top = 95;
-  sun.shadow.camera.bottom = -95;
-  sun.shadow.bias = -0.00035;
-  sun.shadow.normalBias = 0.02;
-  sun.target.position.set(-4, 0, -10);
-  sun.position.set(-4 - 52, 46, -10 + 40);
+
+  const shadow = sun.shadow;
+  const res = smallScreen ? 1024 : 2048;
+  shadow.mapSize.set(res, res);
+  shadow.camera.near = 2;
+  shadow.camera.far = 220;
+  shadow.camera.left = -SHADOW_EXTENT.x;
+  shadow.camera.right = SHADOW_EXTENT.x;
+  shadow.camera.top = SHADOW_EXTENT.z;
+  shadow.camera.bottom = -SHADOW_EXTENT.z;
+  // Cặp bias này khử vằn bóng trên mặt tường và hiện tượng bóng rời chân nhà.
+  shadow.bias = -0.00035;
+  shadow.normalBias = 0.02;
+
   scene.add(sun.target);
   scene.add(sun);
-
   createSunGlow();
 }
 
-// A single additive glow sprite hanging in the sun's direction: gives the
-// sky a light source and the haze a reason, for the cost of one sprite.
+// Một sprite cộng sáng treo về phía mặt trời. Không chiếu sáng gì cả, chỉ để
+// bầu trời có nguồn sáng nhìn thấy được và lớp mù có cớ tồn tại — đổi lại
+// đúng một sprite, rẻ hơn mọi cách làm loá ống kính khác.
 function createSunGlow() {
-  const c = document.createElement("canvas");
-  c.width = 256;
-  c.height = 256;
-  const ctx = c.getContext("2d");
-  const g = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
-  g.addColorStop(0, "rgba(255, 247, 224, 0.95)");
-  g.addColorStop(0.22, "rgba(255, 238, 200, 0.5)");
-  g.addColorStop(0.55, "rgba(255, 228, 184, 0.16)");
-  g.addColorStop(1, "rgba(255, 228, 184, 0)");
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, 256, 256);
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
+  const SIZE = 256;
+  const canvas = document.createElement("canvas");
+  canvas.width = SIZE;
+  canvas.height = SIZE;
+  const ctx = canvas.getContext("2d");
+  const mid = SIZE / 2;
+  const halo = ctx.createRadialGradient(mid, mid, 0, mid, mid, mid);
+  for (const [stop, color] of [
+    [0, "rgba(255, 248, 227, 0.94)"],
+    [0.24, "rgba(255, 239, 203, 0.48)"],
+    [0.58, "rgba(255, 229, 186, 0.15)"],
+    [1, "rgba(255, 229, 186, 0)"],
+  ]) {
+    halo.addColorStop(stop, color);
+  }
+  ctx.fillStyle = halo;
+  ctx.fillRect(0, 0, SIZE, SIZE);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
   const sprite = new THREE.Sprite(
     new THREE.SpriteMaterial({
-      map: tex,
+      map: texture,
       transparent: true,
       opacity: 0.85,
       blending: THREE.AdditiveBlending,
@@ -483,21 +489,23 @@ function createSunGlow() {
       fog: false,
     }),
   );
-  // Same azimuth as the sun light, dropped near the horizon so orbiting
-  // cameras actually catch it over the Hudson.
+  // Cùng hướng với đèn mặt trời nhưng hạ thấp gần chân trời, để lúc xoay
+  // camera vẫn bắt được nó phía trên sông Hồng.
   sprite.position.set(-200, 82, 128);
   sprite.scale.setScalar(170);
   scene.add(sprite);
 }
 
+/* ---------- Vài khối dựng sẵn ---------- */
+
 function createShoreline(coords) {
-  makeTube([...coords, coords[0]], 0.045, materials.seawall, 0.12, Math.max(48, coords.length * 14));
+  const closed = [...coords, coords[0]];
+  makeTube(closed, 0.045, materials.seawall, 0.12, Math.max(48, coords.length * 14));
 }
 
 function createPier(lat, lng, width, depth, rotation = 0) {
-  const p = project(lat, lng, 0.08);
   const group = new THREE.Group();
-  group.position.copy(p);
+  group.position.copy(project(lat, lng, 0.08));
   group.rotation.y = rotation;
 
   const deck = new THREE.Mesh(new THREE.BoxGeometry(width, 0.16, depth), materials.seawall);
@@ -506,10 +514,11 @@ function createPier(lat, lng, width, depth, rotation = 0) {
   deck.receiveShadow = true;
   group.add(deck);
 
-  const postGeo = new THREE.CylinderGeometry(0.055, 0.055, 0.42, 8);
+  // Bốn cọc chống, thụt vào trong mép sàn cho ra dáng cầu cảng.
+  const postGeometry = new THREE.CylinderGeometry(0.055, 0.055, 0.42, 8);
   for (const x of [-width * 0.38, width * 0.38]) {
     for (const z of [-depth * 0.36, depth * 0.36]) {
-      const post = new THREE.Mesh(postGeo, materials.bridge);
+      const post = new THREE.Mesh(postGeometry, materials.bridge);
       post.position.set(x, -0.04, z);
       post.castShadow = true;
       group.add(post);
@@ -519,10 +528,12 @@ function createPier(lat, lng, width, depth, rotation = 0) {
 }
 
 function ellipseCoords(lat, lng, latRadius, lngRadius, steps = 28) {
-  return Array.from({ length: steps }, (_, index) => {
-    const angle = (index / steps) * Math.PI * 2;
-    return [lat + Math.sin(angle) * latRadius, lng + Math.cos(angle) * lngRadius];
-  });
+  const coords = [];
+  for (let i = 0; i < steps; i += 1) {
+    const angle = (i / steps) * Math.PI * 2;
+    coords.push([lat + Math.sin(angle) * latRadius, lng + Math.cos(angle) * lngRadius]);
+  }
+  return coords;
 }
 
 function createBlockAt(lat, lng, width, depth, height, material, rotation = 0, y = 0) {
@@ -739,6 +750,22 @@ function createParks() {
   PARKS.filter((p) => p.length >= 4).forEach((poly) => scatterTreesInPoly(poly, 18, random));
 }
 
+// Lòng sông Hồng, ghép từ chính hai bờ đã vẽ: mép sông của bờ hữu chạy từ
+// bắc xuống nam, rồi mép sông của bờ tả chạy ngược lên. Dựng từ hai mảng gốc
+// chứ không chép toạ độ ra, để sửa bờ là lòng sông tự khớp theo.
+//
+// Nới mỗi mép ra ngoài một quãng: mảng phù sa cố ý thò sang dưới hai bờ.
+// Hai bờ nằm ở cao độ 0 còn mảng này ở -0.16 nên phần thò ra bị che hết,
+// đổi lại không bao giờ hở một sợi nước xanh ở mép do sai số làm tròn.
+const RIVER_OVERLAP = 0.005;
+const nudge = (coords, delta) => coords.map(([lat, lng]) => [lat, lng + delta]);
+const RIVER_CHANNEL = [
+  [21.125, 105.8185 - RIVER_OVERLAP],
+  ...nudge(WEST_BANK.slice(0, 16), -RIVER_OVERLAP),
+  ...nudge(EAST_BANK.slice(0, 14), RIVER_OVERLAP).toReversed(),
+  [21.125, 105.831 + RIVER_OVERLAP],
+];
+
 function createBaseMap() {
   const waterGeo = new THREE.PlaneGeometry(260, 230, 80, 72);
   const water = new THREE.Mesh(waterGeo, materials.water);
@@ -748,6 +775,12 @@ function createBaseMap() {
   water.userData.baseZ = waterGeo.attributes.position.array.slice();
   scene.add(water);
   waterSurfaces.push(water);
+
+  // Phù sa phủ lên mặt nước nền, chỉ trong đúng lòng sông. Cao độ -0.03 là
+  // tính toán chứ không phải chọn bừa: mặt nước nền ở -0.18 nhưng gợn sóng
+  // nhô lên tới +0.09, nên bất cứ chỗ nào thấp hơn -0.09 là sóng xanh sẽ
+  // đâm xuyên qua thành từng vệt. Trên -0.03 thì lại chạm hai bờ ở cao độ 0.
+  makeShape(RIVER_CHANNEL, materials.river, -0.03, true);
 
   // Main city with the three big lakes punched out as real water.
   makeShape(WEST_BANK, materials.asphalt, 0, true, LAKES);
@@ -782,11 +815,12 @@ const GRID = (() => {
   return { av, st, origin };
 })();
 
-// Lattice spacing shared by the buildings, the sidewalk plates, and the
-// traffic network, so traffic flows in the same gaps the blocks leave open.
-// Hanoi blocks are much smaller than Manhattan's.
-const CELL_U = 0.0009; // ~100 m between east-west streets
-const CELL_V = 0.0016; // ~170 m between north-south streets
+// Bước lưới dùng chung cho nhà, tấm lát vỉa hè và mạng giao thông, để xe
+// chạy đúng vào những khe mà các ô phố chừa ra.
+// Ô phố Hà Nội nhỏ hơn hẳn ô phố các thành phố quy hoạch bàn cờ phương Tây:
+// phố cổ chia lô theo chiều sâu thửa ruộng cũ, ngang chỉ vài mét.
+const CELL_U = 0.0009; // ~100 m giữa hai phố chạy đông–tây
+const CELL_V = 0.0016; // ~170 m giữa hai phố chạy bắc–nam
 const GRID_METRICS = (() => {
   const gridOrigin = project(GRID.origin.lat, GRID.origin.lng);
   const uVec = project(
@@ -1268,9 +1302,9 @@ function createBuildings() {
   const random = seededRandom(43);
   const instances = [];
 
-  // Manhattan buildings live INSIDE street blocks, aligned to the same
-  // lattice the visible grid draws. Shared block placement is what makes the
-  // city read as a real city instead of scattered boxes.
+  // Nhà nằm BÊN TRONG các ô phố, bám đúng cái lưới mà mạng đường vẽ ra.
+  // Chính việc dùng chung một lưới đó làm cảnh này đọc ra thành phố thật,
+  // chứ không phải một đống hộp rải bừa.
   const { uVec, vVec, uLen, vLen, rot: gridRot } = GRID_METRICS;
 
   const filledCells = new Set();
@@ -1383,7 +1417,8 @@ function createBuildings() {
     scene.add(ghostMesh);
   }
 
-  // Solid (Manhattan) buildings keep full detail: palette, roofs, windows.
+  // Nhà "đặc" — phần thành phố dựng đủ chi tiết: màu tường, mái, cửa sổ,
+  // đồ đạc trên sân thượng. Nhà "mờ" bên kia sông đã dựng xong ở trên.
   instances.length = 0;
   instances.push(...solidBoxes);
 
@@ -1397,26 +1432,31 @@ function createBuildings() {
   const quat = new THREE.Quaternion();
   const scale = new THREE.Vector3();
   const pos = new THREE.Vector3();
-  // A small palette of Hanoi facade tones: colonial yellow, cream plaster,
-  // weathered concrete, mint, and the glass of the new towers.
-  const palette = [
-    new THREE.Color(0xe8d79c), // colonial ochre yellow
-    new THREE.Color(0xdec98f), // deeper French yellow
-    new THREE.Color(0xe9e2cd), // cream plaster
-    new THREE.Color(0xb8bcb2), // weathered concrete
-    new THREE.Color(0xa6b4bf), // cool tower glass
-    new THREE.Color(0xcfd8c4), // faded mint
-  ];
-  const color = new THREE.Color();
-  // Roof tones: lots of terracotta tile and oxide red over the low city.
-  const roofPalette = [
-    new THREE.Color(0x646c75), // slate
-    new THREE.Color(0x565e66), // dark slate
-    new THREE.Color(0xa05a40), // terracotta tile
-    new THREE.Color(0x83493c), // oxide red
-    new THREE.Color(0x5f6a5a), // weathered green
-    new THREE.Color(0x968e7d), // tar/gravel
-  ];
+
+  // Màu tường Hà Nội, xếp theo thời kỳ xây chứ không theo chiều cao:
+  //   0–1 vàng thuộc địa, hai sắc đậm nhạt của các biệt thự thời Pháp
+  //   2   vôi kem, màu mặc định của nhà ống xây thập niên 90
+  //   3   bê tông bạc màu, khu tập thể
+  //   4   kính tháp mới
+  //   5   xanh bạc hà nhạt, cái màu sơn rất hay gặp ở nhà phố
+  const WALL_TONES = [0xe8d79c, 0xdec98f, 0xe9e2cd, 0xb8bcb2, 0xa6b4bf, 0xcfd8c4].map(
+    (hex) => new THREE.Color(hex),
+  );
+  // Mái nhìn từ trên cao mới là thứ làm Hà Nội ra Hà Nội: quá nửa thành phố
+  // lợp tôn, và tôn ở đây có màu — xanh, đỏ, bạc — chứ không phải mái nhựa
+  // đường xám như phố Mỹ. Ngói ta và ngói cũ lên rêu lo phần phố cổ.
+  const ROOF_TONES = {
+    tonXanh: new THREE.Color(0x3f6f73),
+    tonDo: new THREE.Color(0x9c4b34),
+    ngoiTa: new THREE.Color(0xa85a3c),
+    ngoiReu: new THREE.Color(0x6b6a4e),
+    tonBac: new THREE.Color(0xa9adaa),
+    xiMang: new THREE.Color(0x8b8c88),
+  };
+  const LOW_ROOFS = [ROOF_TONES.tonXanh, ROOF_TONES.tonDo, ROOF_TONES.ngoiTa, ROOF_TONES.ngoiReu];
+  const TALL_ROOFS = [ROOF_TONES.xiMang, ROOF_TONES.tonBac];
+
+  const wallColor = new THREE.Color();
   const roofColor = new THREE.Color();
 
   const roofMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), materials.roofColored, instances.length);
@@ -1438,133 +1478,155 @@ function createBuildings() {
   storefrontMesh.receiveShadow = true;
   let storefrontCount = 0;
 
-  // Rooftop detail collected during the main pass, instanced afterwards:
-  // wedding-cake setback tiers, wooden water tanks, and AC units.
-  const tiers = [];
+  // Thu thập trong lượt chạy chính rồi mới dựng hàng loạt ở cuối: phần cơi
+  // nới trên nóc, bồn nước inox, cục nóng điều hoà.
+  const addOns = [];
   const tanks = [];
   const acUnits = [];
-  const rooftopOffset = new THREE.Vector3();
+  const offset = new THREE.Vector3();
+
+  const placeInstanced = (target, index, x, y, z, rot, sx, sy, sz) => {
+    pos.set(x, y, z);
+    quat.setFromAxisAngle(UP, rot);
+    scale.set(sx, sy, sz);
+    matrix.compose(pos, quat, scale);
+    target.setMatrixAt(index, matrix);
+  };
+
+  // Dải cửa sổ chạy ngang một mặt tường. Gom lại vì bốn mặt chỉ khác nhau ở
+  // hướng đẩy ra và kích thước, trước kia bốn khối lệnh gần như giống hệt.
+  const addWindowBand = (box, y, dir, along, lift) => {
+    const across = new THREE.Vector3(Math.sin(box.rot), 0, Math.cos(box.rot));
+    const side = new THREE.Vector3(Math.cos(box.rot), 0, -Math.sin(box.rot));
+    const axis = along === "w" ? across : side;
+    pos.set(box.x, y + lift, box.z).addScaledVector(axis, dir * ((along === "w" ? box.d : box.w) / 2 + 0.018));
+    quat.setFromAxisAngle(UP, box.rot);
+    if (along === "w") scale.set(box.w * 0.72, 0.035, 0.02);
+    else scale.set(0.02, 0.035, box.d * 0.7);
+    matrix.compose(pos, quat, scale);
+    windowMesh.setMatrixAt(windowCount, matrix);
+    windowCount += 1;
+  };
 
   instances.forEach((box, index) => {
-    pos.set(box.x, box.h / 2, box.z);
-    quat.setFromAxisAngle(UP, box.rot);
-    scale.set(box.w, box.h, box.d);
-    matrix.compose(pos, quat, scale);
-    mesh.setMatrixAt(index, matrix);
-    // Tall buildings skew glassy/cool; low/mid skew stone & brick.
-    let tone;
-    if (box.h > 2.4) tone = box.shade < 0.5 ? palette[4] : palette[2];
-    else if (box.h > 1.3) tone = palette[[2, 4, 0, 5][Math.floor(box.shade * 4) % 4]];
-    else tone = palette[[0, 1, 3, 5][Math.floor(box.shade * 4) % 4]];
-    color.copy(tone).offsetHSL(0, 0, (box.shade - 0.5) * 0.06);
-    mesh.setColorAt(index, color);
+    placeInstanced(mesh, index, box.x, box.h / 2, box.z, box.rot, box.w, box.h, box.d);
 
-    // Classic NYC setback: taller towers step in for their top section.
-    const tiered = box.h > 2.6 && box.roof > 0.35;
-    if (tiered) {
-      tiers.push({
-        x: box.x,
-        z: box.z,
+    // Nhà càng cao càng ngả về kính và bê tông lạnh; nhà thấp giữ vôi vàng
+    // và tường bạc màu. Trộn thêm chút sáng tối theo từng nhà cho khỏi đều.
+    let tone;
+    if (box.h > 2.4) tone = WALL_TONES[box.shade < 0.5 ? 4 : 2];
+    else if (box.h > 1.3) tone = WALL_TONES[[2, 4, 0, 5][Math.floor(box.shade * 4) % 4]];
+    else tone = WALL_TONES[[0, 1, 3, 5][Math.floor(box.shade * 4) % 4]];
+    wallColor.copy(tone).offsetHSL(0, 0, (box.shade - 0.5) * 0.06);
+    mesh.setColorAt(index, wallColor);
+
+    // Cơi nới trên nóc. Nhà ống Hà Nội hay đội thêm một cái tum lệch hẳn về
+    // một bên — chỗ để thang, phơi đồ, nuôi chim — chứ không giật cấp cân
+    // đối kiểu tháp Mỹ. Chỉ tháp thật cao mới thu vào đều bốn phía.
+    const isTower = box.h > 3.4;
+    const hasAddOn = box.roof > 0.35 && (isTower || (box.h > 1.9 && box.shade > 0.45));
+    let topY = box.h;
+    let topW = box.w;
+    let topD = box.d;
+    if (hasAddOn) {
+      const shrink = isTower ? 0.62 : 0.55;
+      const rise = isTower ? Math.min(1.6, box.h * 0.28) : 0.3 + box.roof * 0.26;
+      // Tháp thu vào giữa; nhà ống đẩy tum lệch về phía sau.
+      offset.set(0, 0, isTower ? 0 : box.d * (0.5 - shrink / 2) * 0.8).applyAxisAngle(UP, box.rot);
+      addOns.push({
+        x: box.x + offset.x,
+        z: box.z + offset.z,
         rot: box.rot,
-        w: box.w * 0.62,
-        d: box.d * 0.62,
+        w: box.w * shrink,
+        d: box.d * shrink,
         y: box.h,
-        h: Math.min(1.6, box.h * 0.28),
-        color: color.clone().offsetHSL(0, 0, 0.03),
+        h: rise,
+        color: wallColor.clone().offsetHSL(0, 0, isTower ? 0.03 : -0.04),
       });
+      topY = box.h + rise;
+      topW = box.w * shrink;
+      topD = box.d * shrink;
     }
-    const roofTopY = tiered ? box.h + tiers[tiers.length - 1].h : box.h;
-    const roofW = tiered ? box.w * 0.62 : box.w;
-    const roofD = tiered ? box.d * 0.62 : box.d;
 
     if (box.roof > 0.5 || box.h > 4.4) {
-      pos.set(box.x, roofTopY + 0.08, box.z);
-      scale.set(roofW * (0.46 + box.roof * 0.28), 0.12, roofD * (0.44 + box.roof * 0.26));
-      matrix.compose(pos, quat, scale);
-      roofMesh.setMatrixAt(roofCount, matrix);
-      // Mostly muted slate/gravel; ~30% get a warmer terracotta/red/green pop.
-      const warm = box.shade > 0.84 && box.h < 2.2;
-      roofColor.copy(roofPalette[warm ? 2 + (Math.floor(box.roof * 3) % 3) : box.roof > 0.5 ? 0 : 5]);
+      // Nhà thấp lợp tôn màu hoặc ngói; nhà cao đổ mái bằng xi măng.
+      const low = box.h < 2.4;
+      const palette = low ? LOW_ROOFS : TALL_ROOFS;
+      roofColor.copy(palette[Math.floor(box.roof * palette.length) % palette.length]);
       roofMesh.setColorAt(roofCount, roofColor);
+      placeInstanced(
+        roofMesh,
+        roofCount,
+        box.x + (hasAddOn && !isTower ? offset.x : 0),
+        topY + 0.08,
+        box.z + (hasAddOn && !isTower ? offset.z : 0),
+        box.rot,
+        topW * (0.46 + box.roof * 0.28),
+        0.12,
+        topD * (0.44 + box.roof * 0.26),
+      );
       roofCount += 1;
     }
 
-    // Inox water tanks on a share of the mid-rise stock, AC boxes on most
-    // roofs: the two props that make aerial Hanoi read as Hanoi.
-    if (!tiered && box.h > 1.05 && box.h <= 2.6 && box.roof > 0.58) {
-      rooftopOffset.set(box.w * 0.2, 0, box.d * 0.16).applyAxisAngle(UP, box.rot);
-      tanks.push({ x: box.x + rooftopOffset.x, z: box.z + rooftopOffset.z, y: box.h, s: 0.8 + box.shade * 0.5 });
+    // Bồn inox trên nóc nhà tầm trung, cục nóng điều hoà trên hầu hết mọi
+    // nóc: hai thứ vặt vãnh này mới làm Hà Nội nhìn từ trên cao ra Hà Nội.
+    if (!isTower && box.h > 1.05 && box.h <= 2.6 && box.roof > 0.58) {
+      offset.set(box.w * 0.2, 0, box.d * 0.16).applyAxisAngle(UP, box.rot);
+      tanks.push({ x: box.x + offset.x, z: box.z + offset.z, y: box.h, s: 0.8 + box.shade * 0.5 });
     }
     if (box.h > 0.85 && box.shade > 0.42) {
-      rooftopOffset.set(-box.w * 0.21, 0, box.d * 0.2).applyAxisAngle(UP, box.rot);
-      acUnits.push({ x: box.x + rooftopOffset.x, z: box.z + rooftopOffset.z, y: roofTopY, rot: box.rot });
-      if (box.shade > 0.78 && !tiered) {
-        rooftopOffset.set(box.w * 0.24, 0, -box.d * 0.18).applyAxisAngle(UP, box.rot);
-        acUnits.push({ x: box.x + rooftopOffset.x, z: box.z + rooftopOffset.z, y: box.h, rot: box.rot + 0.5 });
+      offset.set(-box.w * 0.21, 0, box.d * 0.2).applyAxisAngle(UP, box.rot);
+      acUnits.push({ x: box.x + offset.x, z: box.z + offset.z, y: topY, rot: box.rot });
+      if (box.shade > 0.78 && !hasAddOn) {
+        offset.set(box.w * 0.24, 0, -box.d * 0.18).applyAxisAngle(UP, box.rot);
+        acUnits.push({ x: box.x + offset.x, z: box.z + offset.z, y: box.h, rot: box.rot + 0.5 });
       }
     }
 
-    const front = new THREE.Vector3(Math.sin(box.rot), 0, Math.cos(box.rot));
-    const side = new THREE.Vector3(Math.cos(box.rot), 0, -Math.sin(box.rot));
-
+    // Dải cửa sổ: nhà tầm trung hai mặt, nhà cao đủ bốn mặt.
     if (box.h > 1.7) {
       const floors = Math.min(5, Math.floor(box.h / 1.05));
-      // Taller buildings get bands on all four faces; mid-rises on two.
       const allFaces = box.h > 2.2;
       for (let floor = 1; floor <= floors; floor += 1) {
         const y = Math.min(box.h - 0.35, floor * (box.h / (floors + 1)));
-        pos.set(box.x, y, box.z).addScaledVector(front, box.d / 2 + 0.018);
-        scale.set(box.w * 0.72, 0.035, 0.02);
-        matrix.compose(pos, quat, scale);
-        windowMesh.setMatrixAt(windowCount, matrix);
-        windowCount += 1;
-
-        pos.set(box.x, y + 0.1, box.z).addScaledVector(side, box.w / 2 + 0.018);
-        scale.set(0.02, 0.035, box.d * 0.7);
-        matrix.compose(pos, quat, scale);
-        windowMesh.setMatrixAt(windowCount, matrix);
-        windowCount += 1;
-
+        addWindowBand(box, y, 1, "w", 0);
+        addWindowBand(box, y, 1, "d", 0.1);
         if (allFaces) {
-          pos.set(box.x, y + 0.05, box.z).addScaledVector(front, -(box.d / 2 + 0.018));
-          scale.set(box.w * 0.72, 0.035, 0.02);
-          matrix.compose(pos, quat, scale);
-          windowMesh.setMatrixAt(windowCount, matrix);
-          windowCount += 1;
-
-          pos.set(box.x, y + 0.15, box.z).addScaledVector(side, -(box.w / 2 + 0.018));
-          scale.set(0.02, 0.035, box.d * 0.7);
-          matrix.compose(pos, quat, scale);
-          windowMesh.setMatrixAt(windowCount, matrix);
-          windowCount += 1;
+          addWindowBand(box, y, -1, "w", 0.05);
+          addWindowBand(box, y, -1, "d", 0.15);
         }
       }
     }
 
-    // Street-level storefront glazing on the avenue-facing side.
+    // Mặt kính tầng trệt phía quay ra đường lớn — hàng quán Hà Nội gần như
+    // nhà nào cũng có, tầng một là chỗ buôn bán.
     if (box.h > 0.55 && box.shade > 0.25) {
-      pos.set(box.x, 0.13, box.z).addScaledVector(front, box.d / 2 + 0.012);
+      const across = new THREE.Vector3(Math.sin(box.rot), 0, Math.cos(box.rot));
+      pos.set(box.x, 0.13, box.z).addScaledVector(across, box.d / 2 + 0.012);
+      quat.setFromAxisAngle(UP, box.rot);
       scale.set(box.w * 0.78, 0.22, 0.02);
       matrix.compose(pos, quat, scale);
       storefrontMesh.setMatrixAt(storefrontCount, matrix);
       storefrontCount += 1;
     }
   });
-  scene.add(mesh);
-  roofMesh.count = roofCount;
-  scene.add(roofMesh);
-  windowMesh.count = windowCount;
-  scene.add(windowMesh);
-  storefrontMesh.count = storefrontCount;
-  scene.add(storefrontMesh);
 
-  // Keep the plate centers around: pedestrians walk their perimeters.
+  scene.add(mesh);
+  for (const [target, count] of [
+    [roofMesh, roofCount],
+    [windowMesh, windowCount],
+    [storefrontMesh, storefrontCount],
+  ]) {
+    target.count = count;
+    scene.add(target);
+  }
+
+  // Giữ lại tâm các ô phố: người đi bộ đi vòng quanh mép chúng.
   sidewalkPlates.length = 0;
   sidewalkPlates.push(...blockPlates);
 
-  // Sidewalk plates: the city blocks themselves, floated just above the
-  // asphalt ground so the streets are the gaps between them. Avenue gaps run
-  // wider than cross-street gaps, like the real grid.
+  // Ô phố lát vỉa hè, nhấc cao hơn mặt nhựa một chút để đường chính là các
+  // khe giữa chúng. Khe dọc theo đại lộ rộng hơn khe ngang, như ngoài đời.
   if (blockPlates.length) {
     const plateMesh = new THREE.InstancedMesh(
       new THREE.BoxGeometry(1, 0.06, 1),
@@ -1574,58 +1636,45 @@ function createBuildings() {
     plateMesh.receiveShadow = true;
     const plateColor = new THREE.Color();
     blockPlates.forEach((plate, i) => {
-      pos.set(plate.x, 0, plate.z);
-      quat.setFromAxisAngle(UP, gridRot);
-      scale.set(vLen - 0.26, 1, uLen - 0.12);
-      matrix.compose(pos, quat, scale);
-      plateMesh.setMatrixAt(i, matrix);
-      plateColor.setHSL(0.09, 0.06, 0.8 + ((i * 2654435761) % 100) / 100 * 0.05);
+      placeInstanced(plateMesh, i, plate.x, 0, plate.z, gridRot, vLen - 0.26, 1, uLen - 0.12);
+      // Băm chỉ số ra một chút sáng tối, để dãy ô phố không đều tăm tắp.
+      plateColor.setHSL(0.09, 0.06, 0.8 + (((i * 2654435761) % 100) / 100) * 0.05);
       plateMesh.setColorAt(i, plateColor);
     });
     scene.add(plateMesh);
   }
 
-  if (tiers.length) {
-    const tierMesh = new THREE.InstancedMesh(geometry, buildingMaterial, tiers.length);
-    tierMesh.castShadow = true;
-    tierMesh.receiveShadow = true;
-    tiers.forEach((tier, i) => {
-      pos.set(tier.x, tier.y + tier.h / 2, tier.z);
-      quat.setFromAxisAngle(UP, tier.rot);
-      scale.set(tier.w, tier.h, tier.d);
-      matrix.compose(pos, quat, scale);
-      tierMesh.setMatrixAt(i, matrix);
-      tierMesh.setColorAt(i, tier.color);
+  if (addOns.length) {
+    const addOnMesh = new THREE.InstancedMesh(geometry, buildingMaterial, addOns.length);
+    addOnMesh.castShadow = true;
+    addOnMesh.receiveShadow = true;
+    addOns.forEach((part, i) => {
+      placeInstanced(addOnMesh, i, part.x, part.y + part.h / 2, part.z, part.rot, part.w, part.h, part.d);
+      addOnMesh.setColorAt(i, part.color);
     });
-    scene.add(tierMesh);
+    scene.add(addOnMesh);
   }
 
   if (tanks.length) {
-    // Bồn inox: the stainless drums on every other Hanoi rooftop.
-    const barrelMesh = new THREE.InstancedMesh(
+    // Bồn inox: cái trống thép nằm trên nóc cứ hai nhà thì một.
+    const barrel = new THREE.InstancedMesh(
       new THREE.CylinderGeometry(0.062, 0.062, 0.15, 10),
       new THREE.MeshStandardMaterial({ color: 0xc9cfd4, roughness: 0.35, metalness: 0.55 }),
       tanks.length,
     );
-    const lidMesh = new THREE.InstancedMesh(
+    const lid = new THREE.InstancedMesh(
       new THREE.SphereGeometry(0.062, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2),
       new THREE.MeshStandardMaterial({ color: 0xb8bfc5, roughness: 0.4, metalness: 0.5 }),
       tanks.length,
     );
-    barrelMesh.castShadow = true;
-    lidMesh.castShadow = true;
-    quat.identity();
+    barrel.castShadow = true;
+    lid.castShadow = true;
     tanks.forEach((tank, i) => {
-      scale.setScalar(tank.s);
-      pos.set(tank.x, tank.y + 0.075 * tank.s, tank.z);
-      matrix.compose(pos, quat, scale);
-      barrelMesh.setMatrixAt(i, matrix);
-      pos.set(tank.x, tank.y + 0.15 * tank.s, tank.z);
-      matrix.compose(pos, quat, scale);
-      lidMesh.setMatrixAt(i, matrix);
+      placeInstanced(barrel, i, tank.x, tank.y + 0.075 * tank.s, tank.z, 0, tank.s, tank.s, tank.s);
+      placeInstanced(lid, i, tank.x, tank.y + 0.15 * tank.s, tank.z, 0, tank.s, tank.s, tank.s);
     });
-    scene.add(barrelMesh);
-    scene.add(lidMesh);
+    scene.add(barrel);
+    scene.add(lid);
   }
 
   if (acUnits.length) {
@@ -1635,11 +1684,7 @@ function createBuildings() {
       acUnits.length,
     );
     acUnits.forEach((unit, i) => {
-      pos.set(unit.x, unit.y + 0.025, unit.z);
-      quat.setFromAxisAngle(UP, unit.rot);
-      scale.setScalar(1);
-      matrix.compose(pos, quat, scale);
-      acMesh.setMatrixAt(i, matrix);
+      placeInstanced(acMesh, i, unit.x, unit.y + 0.025, unit.z, unit.rot, 1, 1, 1);
     });
     scene.add(acMesh);
   }
@@ -2087,70 +2132,95 @@ function createLandmarks() {
   addLandmarkLabel("Sông Hồng", 21.02, 105.869, 0.6);
 }
 
+// Gắn dữ liệu địa điểm vào mọi mặt lưới con, để bấm trúng bất kỳ phần nào
+// của cái pin cũng ra đúng địa điểm ấy.
+function tagPart(mesh, item, extra) {
+  mesh.userData.item = item;
+  if (extra) Object.assign(mesh.userData, extra);
+  return mesh;
+}
+
 function createMarker(item) {
   const color = stageColor(item.stage);
-  const material = new THREE.MeshStandardMaterial({
+  const body = new THREE.MeshStandardMaterial({
     color,
     roughness: 0.36,
     emissive: color.clone().multiplyScalar(0.12),
   });
-  const p = project(item.lat, item.lng);
+
   const group = new THREE.Group();
+  const p = project(item.lat, item.lng);
   group.position.set(p.x, 0.18, p.z);
   group.userData.item = item;
 
-  const pin = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.065, 1.05, 10), material);
-  pin.position.y = 0.52;
-  pin.castShadow = true;
-  pin.userData.item = item;
-  group.add(pin);
+  // Cây kim: cột mảnh, đầu tròn, vòng sáng dưới chân cho biết nó cắm ở đâu
+  // khi nhìn chếch từ trên xuống.
+  const stem = tagPart(
+    new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.065, 1.05, 10), body),
+    item,
+  );
+  stem.position.y = 0.52;
+  stem.castShadow = true;
 
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 18, 12), material);
+  const head = tagPart(new THREE.Mesh(new THREE.SphereGeometry(0.24, 18, 12), body), item);
   head.position.y = 1.12;
   head.castShadow = true;
-  head.userData.item = item;
-  group.add(head);
 
-  const halo = new THREE.Mesh(
-    new THREE.RingGeometry(0.34, 0.44, 24),
-    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.34, side: THREE.DoubleSide }),
+  const halo = tagPart(
+    new THREE.Mesh(
+      new THREE.RingGeometry(0.34, 0.44, 24),
+      new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.34,
+        side: THREE.DoubleSide,
+      }),
+    ),
+    item,
   );
   halo.rotation.x = -Math.PI / 2;
   halo.position.y = 0.08;
-  halo.userData.item = item;
-  group.add(halo);
 
-  const hitArea = new THREE.Mesh(
-    new THREE.SphereGeometry(0.48, 12, 8),
-    new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }),
+  // Quả cầu trong suốt bọc ngoài, chỉ để bắt chuột: cột pin quá mảnh, không
+  // có nó thì trên điện thoại gần như không bấm trúng.
+  const hitArea = tagPart(
+    new THREE.Mesh(
+      new THREE.SphereGeometry(0.48, 12, 8),
+      new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }),
+    ),
+    item,
+    { hitArea: true },
   );
   hitArea.position.y = 1.05;
-  hitArea.userData.item = item;
-  hitArea.userData.hitArea = true;
-  group.add(hitArea);
 
+  const parts = [stem, head, halo, hitArea];
+  parts.forEach((part) => group.add(part));
   scene.add(group);
-  markerMeshes.push(pin, head, halo, hitArea);
+  markerMeshes.push(...parts);
   startupMarkers.set(item.id, { group, item, halo });
 }
 
+// Điểm nền: khách sạn, trường, chợ. Cố tình để màu nhạt và trầm hơn ba nhóm
+// chính, để mắt vẫn phân biệt được đâu là địa điểm của bản đồ, đâu là mốc
+// định hướng cho dễ hình dung.
+const CONTEXT_STYLE = {
+  "Khách sạn": { color: 0xc79a3e, shape: "octa" },
+  "Đại học": { color: 0xb5644f, shape: "box" },
+  "Chợ & TTTM": { color: 0x6f9d78, shape: "box" },
+};
+const CONTEXT_FALLBACK = { color: 0xb2bcc2, shape: "box" };
+
 function createContextMarker(item) {
-  const color =
-    item.category === "Khách sạn"
-      ? 0xe8b500
-      : item.category === "Đại học"
-        ? 0xd74a3d
-        : item.category === "Chợ & TTTM"
-          ? 0x71c97f
-          : 0xb9c7cf;
-  const material = new THREE.MeshStandardMaterial({
-    color,
-    roughness: 0.48,
-    emissive: new THREE.Color(color).multiplyScalar(0.06),
-  });
+  const style = CONTEXT_STYLE[item.category] || CONTEXT_FALLBACK;
+  const marker = new THREE.Mesh(
+    style.shape === "octa" ? new THREE.OctahedronGeometry(0.56) : new THREE.BoxGeometry(0.82, 0.82, 0.82),
+    new THREE.MeshStandardMaterial({
+      color: style.color,
+      roughness: 0.48,
+      emissive: new THREE.Color(style.color).multiplyScalar(0.06),
+    }),
+  );
   const p = project(item.lat, item.lng);
-  const geometry = item.category === "Khách sạn" ? new THREE.OctahedronGeometry(0.56) : new THREE.BoxGeometry(0.82, 0.82, 0.82);
-  const marker = new THREE.Mesh(geometry, material);
   marker.position.set(p.x, 0.72, p.z);
   marker.castShadow = true;
   marker.userData.context = item;
@@ -2163,31 +2233,43 @@ function createMarkers() {
 }
 
 /* ---------------------------------------------------------------- */
-/* Cinematic selection: spotlight beam, pulse rings, focus easing    */
+/* Hiệu ứng lúc chọn một địa điểm: cột sáng, vòng lan, siết ống kính  */
 /* ---------------------------------------------------------------- */
 
 const FOG_BASE = scene.fog.density;
 const FOG_FOCUS = FOG_BASE * 1.38;
 const FOV_BASE = camera.fov;
 const FOV_FOCUS = FOV_BASE - 3;
-const FOCUS_COLOR = 0x3a6bff;
+const FOCUS_COLOR = 0x18a184;
 let fogTarget = FOG_BASE;
 let fovTarget = FOV_BASE;
 let focusFx = null;
 
+// Vân dọc cho cột sáng: đặc ở chân, tan dần lên đỉnh. Rộng 4px là đủ vì
+// nó chỉ bị kéo giãn ngang quanh thân trụ.
 function makeBeamTexture() {
-  const c = document.createElement("canvas");
-  c.width = 4;
-  c.height = 128;
-  const ctx = c.getContext("2d");
-  const grad = ctx.createLinearGradient(0, 128, 0, 0);
-  grad.addColorStop(0, "rgba(255,255,255,0.85)");
-  grad.addColorStop(0.55, "rgba(255,255,255,0.26)");
-  grad.addColorStop(1, "rgba(255,255,255,0)");
-  ctx.fillStyle = grad;
+  const canvas = document.createElement("canvas");
+  canvas.width = 4;
+  canvas.height = 128;
+  const ctx = canvas.getContext("2d");
+  const fade = ctx.createLinearGradient(0, 128, 0, 0);
+  fade.addColorStop(0, "rgba(255,255,255,0.85)");
+  fade.addColorStop(0.55, "rgba(255,255,255,0.26)");
+  fade.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = fade;
   ctx.fillRect(0, 0, 4, 128);
-  return new THREE.CanvasTexture(c);
+  return new THREE.CanvasTexture(canvas);
 }
+
+const glowMaterial = (extra) =>
+  new THREE.MeshBasicMaterial({
+    color: FOCUS_COLOR,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    ...extra,
+  });
 
 function ensureFocusFx() {
   if (focusFx) return focusFx;
@@ -2196,35 +2278,18 @@ function ensureFocusFx() {
 
   const beam = new THREE.Mesh(
     new THREE.CylinderGeometry(0.55, 0.4, 7.5, 20, 1, true),
-    new THREE.MeshBasicMaterial({
-      color: FOCUS_COLOR,
-      map: makeBeamTexture(),
-      transparent: true,
-      opacity: 0.5,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    }),
+    glowMaterial({ map: makeBeamTexture(), opacity: 0.5 }),
   );
   beam.position.y = 3.75;
   group.add(beam);
 
-  // Two expanding ground rings, half a cycle apart, for a continuous pulse.
-  const rings = [0, 1].map((i) => {
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(0.5, 0.6, 40),
-      new THREE.MeshBasicMaterial({
-        color: FOCUS_COLOR,
-        transparent: true,
-        opacity: 0,
-        blending: THREE.AdditiveBlending,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-      }),
-    );
+  // Hai vòng loang dưới đất, lệch pha nửa nhịp, để nhịp đập liền mạch chứ
+  // không có quãng nghỉ giữa hai lần lan.
+  const rings = [0, 0.5].map((phase) => {
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.5, 0.6, 40), glowMaterial({ opacity: 0 }));
     ring.rotation.x = -Math.PI / 2;
     ring.position.y = 0.06;
-    ring.userData.phase = i * 0.5;
+    ring.userData.phase = phase;
     group.add(ring);
     return ring;
   });
@@ -2250,7 +2315,9 @@ function releaseFocus() {
 }
 
 function updateFocusFx(elapsed, delta) {
-  // Ease fog density and FOV toward their targets for a soft push-in.
+  // Sương và góc ống kính bò dần về đích, cho ra cú đẩy máy mềm chứ không
+  // giật. Ngưỡng 0.0004 tránh gọi updateProjectionMatrix mỗi khung hình khi
+  // đã gần như đứng yên.
   scene.fog.density += (fogTarget - scene.fog.density) * Math.min(1, delta * 2.6);
   const fovStep = (fovTarget - camera.fov) * Math.min(1, delta * 3);
   if (Math.abs(fovStep) > 0.0004) {
@@ -2261,71 +2328,68 @@ function updateFocusFx(elapsed, delta) {
   if (!focusFx || !focusFx.group.visible) return;
   focusFx.beam.material.opacity = 0.42 + Math.sin(elapsed * 2.1) * 0.1;
   focusFx.beam.rotation.y = elapsed * 0.4;
-  focusFx.rings.forEach((ring) => {
+  for (const ring of focusFx.rings) {
     const t = (elapsed * 0.62 + ring.userData.phase) % 1;
-    const scale = 1 + t * 2.3;
-    ring.scale.setScalar(scale);
-    ring.material.opacity = 0.5 * (1 - t) * (1 - t);
-  });
+    ring.scale.setScalar(1 + t * 2.3);
+    // Mờ theo bình phương để vòng tan nhanh ở cuối, giống sóng nước lan ra.
+    ring.material.opacity = 0.5 * (1 - t) ** 2;
+  }
 }
+
+/* ---------------------------------------------------------------- */
+/* Xe cộ                                                             */
+/* ---------------------------------------------------------------- */
 
 function createCarMesh(color) {
   const group = new THREE.Group();
-  const bodyMaterial = new THREE.MeshStandardMaterial({ color, roughness: 0.42, metalness: 0.02 });
-  const glassMaterial = new THREE.MeshStandardMaterial({
+  const paint = new THREE.MeshStandardMaterial({ color, roughness: 0.42, metalness: 0.02 });
+  const glass = new THREE.MeshStandardMaterial({
     color: 0x9ec6d4,
     roughness: 0.18,
     metalness: 0.04,
     transparent: true,
     opacity: 0.88,
   });
-  const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x171a1f, roughness: 0.72 });
-  const lightMaterial = new THREE.MeshStandardMaterial({
-    color: 0xfff4c8,
-    emissive: new THREE.Color(0xffd56f).multiplyScalar(0.45),
-    roughness: 0.3,
-  });
-  const tailMaterial = new THREE.MeshStandardMaterial({
-    color: 0xe13c36,
-    emissive: new THREE.Color(0xe13c36).multiplyScalar(0.25),
-    roughness: 0.4,
-  });
+  const rubber = new THREE.MeshStandardMaterial({ color: 0x171a1f, roughness: 0.72 });
+  const lamp = (base, tint, strength) =>
+    new THREE.MeshStandardMaterial({
+      color: base,
+      emissive: new THREE.Color(tint).multiplyScalar(strength),
+      roughness: 0.34,
+    });
 
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.18, 0.72), bodyMaterial);
-  body.position.y = 0.16;
-  body.castShadow = true;
-  group.add(body);
+  // Thân xe: ba khối chồng lên nhau — sàn, mui trước, ca-bin kính.
+  for (const [w, h, d, y, z, material] of [
+    [0.44, 0.18, 0.72, 0.16, 0, paint],
+    [0.38, 0.1, 0.24, 0.22, 0.24, paint],
+    [0.31, 0.18, 0.34, 0.32, -0.05, glass],
+  ]) {
+    const part = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+    part.position.set(0, y, z);
+    part.castShadow = true;
+    group.add(part);
+  }
 
-  const hood = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.1, 0.24), bodyMaterial);
-  hood.position.set(0, 0.22, 0.24);
-  hood.castShadow = true;
-  group.add(hood);
-
-  const cabin = new THREE.Mesh(new THREE.BoxGeometry(0.31, 0.18, 0.34), glassMaterial);
-  cabin.position.set(0, 0.32, -0.05);
-  cabin.castShadow = true;
-  group.add(cabin);
-
-  const wheelGeo = new THREE.CylinderGeometry(0.08, 0.08, 0.075, 14);
-  wheelGeo.rotateZ(Math.PI / 2);
+  const wheel = new THREE.CylinderGeometry(0.08, 0.08, 0.075, 14);
+  wheel.rotateZ(Math.PI / 2);
   for (const x of [-0.26, 0.26]) {
     for (const z of [-0.24, 0.24]) {
-      const wheel = new THREE.Mesh(wheelGeo, wheelMaterial);
-      wheel.position.set(x, 0.08, z);
-      wheel.castShadow = true;
-      group.add(wheel);
+      const tyre = new THREE.Mesh(wheel, rubber);
+      tyre.position.set(x, 0.08, z);
+      tyre.castShadow = true;
+      group.add(tyre);
     }
   }
 
-  const headLightGeo = new THREE.BoxGeometry(0.08, 0.045, 0.025);
+  const lampGeometry = new THREE.BoxGeometry(0.08, 0.045, 0.025);
+  const headMaterial = lamp(0xfff4c8, 0xffd56f, 0.45);
+  const tailMaterial = lamp(0xe13c36, 0xe13c36, 0.25);
   for (const x of [-0.12, 0.12]) {
-    const headlight = new THREE.Mesh(headLightGeo, lightMaterial);
-    headlight.position.set(x, 0.17, 0.374);
-    group.add(headlight);
-
-    const tail = new THREE.Mesh(headLightGeo, tailMaterial);
-    tail.position.set(x, 0.17, -0.374);
-    group.add(tail);
+    for (const [z, material] of [[0.374, headMaterial], [-0.374, tailMaterial]]) {
+      const light = new THREE.Mesh(lampGeometry, material);
+      light.position.set(x, 0.17, z);
+      group.add(light);
+    }
   }
 
   group.scale.setScalar(0.92);
@@ -2542,22 +2606,25 @@ function createBirds() {
     { lat: 21.0287, lng: 105.8523, alt: 5.0, radius: 2.4, count: 3 }, // Hồ Gươm
   ];
   const random = seededRandom(77);
-  flocks.forEach((flock) => {
+  for (const flock of flocks) {
     const center = project(flock.lat, flock.lng, flock.alt);
     for (let i = 0; i < flock.count; i += 1) {
       birdFleet.push({
         center,
         radius: flock.radius * (0.72 + random() * 0.5),
         alt: flock.alt + (random() - 0.5) * 1.6,
+        // Dấu của speed quyết định chiều bay, nên nửa đàn lượn ngược lại.
         speed: (0.24 + random() * 0.2) * (random() < 0.5 ? 1 : -1),
         phase: random() * Math.PI * 2,
         flapHz: 5 + random() * 2.5,
         size: 0.44 + random() * 0.22,
       });
     }
-  });
+  }
 
   birdMesh = new THREE.InstancedMesh(geo, material, birdFleet.length);
+  // Đàn chim bay cao và rộng hơn hộp bao của lưới gốc, tắt frustum culling
+  // kẻo cả đàn biến mất khi camera hạ thấp.
   birdMesh.frustumCulled = false;
   scene.add(birdMesh);
 }
@@ -2578,11 +2645,11 @@ function updateBirds(elapsed) {
       bird.alt + Math.sin(elapsed * 1.1 + bird.phase) * 0.5,
       bird.center.z + Math.sin(theta) * bird.radius,
     );
-    // Face along the circle's tangent, banked gently into the turn.
+    // Quay mũi theo tiếp tuyến vòng lượn, nghiêng cánh nhẹ vào phía trong.
     const heading = Math.atan2(-Math.sin(theta) * dir, Math.cos(theta) * dir) + Math.PI / 2;
     birdEuler.set(0, heading, 0.3 * dir, "YXZ");
     birdQuat.setFromEuler(birdEuler);
-    // Wing flap: squash/stretch the chevron height.
+    // Vỗ cánh bằng cách bóp giãn chiều cao hình chữ V — không cần xương cốt gì.
     const flap = 0.25 + Math.abs(Math.sin(elapsed * bird.flapHz + bird.phase)) * 1.35;
     birdScale.set(bird.size, bird.size * flap, bird.size);
     birdMatrix.compose(birdPos, birdQuat, birdScale);
@@ -2590,6 +2657,11 @@ function updateBirds(elapsed) {
   });
   birdMesh.instanceMatrix.needsUpdate = true;
 }
+
+/* ---------- Mây ---------- */
+
+const CLOUD_COUNT = 8;
+const CLOUD_DRIFT_LIMIT = 78;
 
 function createClouds() {
   const material = new THREE.MeshStandardMaterial({
@@ -2599,76 +2671,88 @@ function createClouds() {
     opacity: 0.72,
   });
   const random = seededRandom(12);
-  for (let i = 0; i < 8; i += 1) {
-    const group = new THREE.Group();
-    const parts = 3 + Math.floor(random() * 4);
-    for (let j = 0; j < parts; j += 1) {
+  for (let i = 0; i < CLOUD_COUNT; i += 1) {
+    const cloud = new THREE.Group();
+    // Mỗi đám là mấy quả cầu bẹt chồng lệch nhau, rẻ hơn mọi cách khác mà
+    // nhìn từ xa vẫn ra hình khối mây.
+    const puffs = 3 + Math.floor(random() * 4);
+    for (let j = 0; j < puffs; j += 1) {
       const puff = new THREE.Mesh(new THREE.SphereGeometry(1.2 + random() * 1.5, 12, 8), material);
       puff.scale.y = 0.38;
       puff.position.set((random() - 0.5) * 5, (random() - 0.5) * 0.6, (random() - 0.5) * 2);
-      group.add(puff);
+      cloud.add(puff);
     }
-    group.position.set(-62 + random() * 130, 26 + random() * 12, -70 + random() * 55);
-    group.userData.speed = 0.45 + random() * 0.5;
-    scene.add(group);
+    cloud.position.set(-62 + random() * 130, 26 + random() * 12, -70 + random() * 55);
+    cloud.userData.speed = 0.45 + random() * 0.5;
+    scene.add(cloud);
   }
 }
 
 function updateClouds(delta) {
-  scene.children.forEach((child) => {
-    if (!child.userData.speed) return;
+  for (const child of scene.children) {
+    if (!child.userData.speed) continue;
     child.position.x += delta * child.userData.speed;
-    if (child.position.x > 78) child.position.x = -78;
-  });
+    if (child.position.x > CLOUD_DRIFT_LIMIT) child.position.x = -CLOUD_DRIFT_LIMIT;
+  }
 }
 
-// Soft-edged translucent pads hovering low over the out-of-focus areas
-// (Long Biên, Gia Lâm, and the far fringes): a cheap stand-in for
-// depth-of-field blur that keeps central Hanoi crisp while the map's edges
-// dissolve into atmosphere. Pins out there still poke above the haze.
+/* ---------- Mù phủ rìa bản đồ ---------- */
+
+// Mấy tấm mờ nằm là là trên các vùng ngoài tiêu điểm — Long Biên, Gia Lâm,
+// rìa nam, rìa tây. Đây là cách làm nhoè hậu cảnh rẻ nhất: giữ trung tâm Hà
+// Nội nét căng còn mép bản đồ tan vào không khí. Pin ở ngoài đó vẫn nhô lên
+// trên lớp mù nên không mất địa điểm nào.
 function makeHazeTexture() {
-  const c = document.createElement("canvas");
-  c.width = 256;
-  c.height = 256;
-  const ctx = c.getContext("2d");
-  const g = ctx.createRadialGradient(128, 128, 24, 128, 128, 128);
-  g.addColorStop(0, "rgba(226, 236, 243, 0.8)");
-  g.addColorStop(0.65, "rgba(226, 236, 243, 0.45)");
-  g.addColorStop(1, "rgba(226, 236, 243, 0)");
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, 256, 256);
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
+  const SIZE = 256;
+  const canvas = document.createElement("canvas");
+  canvas.width = SIZE;
+  canvas.height = SIZE;
+  const ctx = canvas.getContext("2d");
+  const mid = SIZE / 2;
+  const fade = ctx.createRadialGradient(mid, mid, 24, mid, mid, mid);
+  fade.addColorStop(0, "rgba(226, 236, 243, 0.8)");
+  fade.addColorStop(0.65, "rgba(226, 236, 243, 0.45)");
+  fade.addColorStop(1, "rgba(226, 236, 243, 0)");
+  ctx.fillStyle = fade;
+  ctx.fillRect(0, 0, SIZE, SIZE);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
 }
+
+const HAZE_PADS = [
+  { lat: 21.052, lng: 105.888, w: 40, d: 42 }, // Long Biên
+  { lat: 21.0, lng: 105.888, w: 34, d: 26 }, // Gia Lâm nam
+  { lat: 20.992, lng: 105.802, w: 44, d: 22 }, // vành đai nam
+  { lat: 21.028, lng: 105.759, w: 24, d: 40 }, // rìa tây Mỹ Đình
+];
 
 function createHaze() {
-  const tex = makeHazeTexture();
-  const pads = [
-    { lat: 21.052, lng: 105.888, w: 40, d: 42 }, // Long Biên
-    { lat: 21.0, lng: 105.888, w: 34, d: 26 }, // Gia Lâm nam
-    { lat: 20.992, lng: 105.802, w: 44, d: 22 }, // vành đai nam
-    { lat: 21.028, lng: 105.759, w: 24, d: 40 }, // rìa tây Mỹ Đình
-  ];
-  pads.forEach((pad, index) => {
-    const material = new THREE.MeshBasicMaterial({
-      map: tex,
-      transparent: true,
-      opacity: 0.55,
-      depthWrite: false,
-    });
-    const plane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
-    plane.rotation.x = -Math.PI / 2;
-    const p = project(pad.lat, pad.lng, 0.85 + index * 0.02);
-    plane.position.copy(p);
-    plane.scale.set(pad.w, pad.d, 1);
-    plane.renderOrder = 4;
-    scene.add(plane);
+  // Một vật liệu dùng chung cho cả bốn tấm; trước kia mỗi tấm tự tạo một
+  // vật liệu giống hệt nhau, tốn bốn lần biên dịch shader mà chẳng để làm gì.
+  const material = new THREE.MeshBasicMaterial({
+    map: makeHazeTexture(),
+    transparent: true,
+    opacity: 0.55,
+    depthWrite: false,
+  });
+  const plane = new THREE.PlaneGeometry(1, 1);
+  HAZE_PADS.forEach((pad, index) => {
+    const mesh = new THREE.Mesh(plane, material);
+    mesh.rotation.x = -Math.PI / 2;
+    // Nhích cao độ từng tấm một chút để chúng không tranh nhau chiều sâu.
+    mesh.position.copy(project(pad.lat, pad.lng, 0.85 + index * 0.02));
+    mesh.scale.set(pad.w, pad.d, 1);
+    mesh.renderOrder = 4;
+    scene.add(mesh);
   });
 }
 
-// Tiny walkers looping the sidewalk edges of the Manhattan blocks: one
-// instanced mesh, a couple hundred matrix updates per frame.
+/* ---------- Người đi bộ ---------- */
+
+// Người đi bộ men theo mép các ô phố: một lưới instanced, vài trăm phép
+// dựng ma trận mỗi khung hình. Hàm này trả về điểm nằm ở tham số t trên chu
+// vi một hình chữ nhật, t chạy 0→1 là đi hết một vòng.
 function rectPerimeterPoint(t, hx, hz, out) {
   const perimeter = 4 * (hx + hz);
   let d = (((t % 1) + 1) % 1) * perimeter;
@@ -2681,21 +2765,25 @@ function rectPerimeterPoint(t, hx, hz, out) {
   return out.set(-hx, 0, hz - d);
 }
 
-const PED_PALETTE = [0x30343c, 0x6b7280, 0x9a4a3f, 0x3b5f8a, 0x7d6a4f, 0xb8b2a4, 0x51606b, 0x8c3f5d].map(
-  (c) => new THREE.Color(c),
-);
+// Áo quần người đi đường: mấy tông trầm hay gặp, thêm một sắc nổi cho vui mắt.
+const PED_PALETTE = [
+  0x30343c, 0x6b7280, 0x9a4a3f, 0x3b5f8a, 0x7d6a4f, 0xb8b2a4, 0x51606b, 0x8c3f5d,
+].map((hex) => new THREE.Color(hex));
+
+const PED_MAX = 240;
 
 function createPedestrians() {
   if (!sidewalkPlates.length) return;
   const random = seededRandom(515);
   const { uLen, vLen, rot } = GRID_METRICS;
   pedRect = {
-    hx: (vLen - 0.26) / 2 + 0.06, // just outside the plate edge: the curb line
+    // Nhích ra ngoài mép tấm lát một chút: đó chính là vạch bó vỉa.
+    hx: (vLen - 0.26) / 2 + 0.06,
     hz: (uLen - 0.12) / 2 + 0.05,
     cos: Math.cos(rot),
     sin: Math.sin(rot),
   };
-  const total = Math.min(240, sidewalkPlates.length * 3);
+  const total = Math.min(PED_MAX, sidewalkPlates.length * 3);
   for (let i = 0; i < total; i += 1) {
     const plate = sidewalkPlates[Math.floor(random() * sidewalkPlates.length)];
     pedFleet.push({
@@ -2708,7 +2796,7 @@ function createPedestrians() {
     });
   }
   const geo = new THREE.BoxGeometry(0.05, 0.15, 0.05);
-  geo.translate(0, 0.075, 0); // feet at the origin
+  geo.translate(0, 0.075, 0); // gốc toạ độ đặt ở chân, để đứng đúng mặt đất
   pedMesh = new THREE.InstancedMesh(
     geo,
     new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9 }),
@@ -2729,12 +2817,13 @@ function updatePedestrians(delta, elapsed) {
   pedFleet.forEach((ped, i) => {
     ped.t += delta * ped.speed;
     rectPerimeterPoint(ped.t, pedRect.hx, pedRect.hz, pedLocal);
+    // Xoay điểm cục bộ theo hướng lưới phố rồi dời về tâm ô.
     pedPos.set(
       ped.cx + pedLocal.x * pedRect.cos + pedLocal.z * pedRect.sin,
       0.032,
       ped.cz - pedLocal.x * pedRect.sin + pedLocal.z * pedRect.cos,
     );
-    // A whisper of bounce sells the walk without skeletal anything.
+    // Nhún nhẹ một cái là ra dáng đang đi, khỏi cần xương cốt gì hết.
     const bob = 1 + Math.sin(elapsed * 9 + ped.phase) * 0.06;
     pedScale.set(ped.size, ped.size * bob, ped.size);
     pedMatrix.compose(pedPos, pedQuat, pedScale);
@@ -2754,8 +2843,8 @@ function updateWater(elapsed) {
       const x = base[ix];
       const y = base[ix + 1];
       const wave =
-        Math.sin(x * 0.18 + elapsed * 0.6) * 0.08 +
-        Math.cos(y * 0.22 - elapsed * 0.45) * 0.06;
+        Math.sin(x * 0.18 + elapsed * 0.6) * 0.05 +
+        Math.cos(y * 0.22 - elapsed * 0.45) * 0.04;
       pos.array[ix + 2] = base[ix + 2] + wave;
     }
     pos.needsUpdate = true;
@@ -2773,10 +2862,10 @@ function createLabels() {
     button.style.setProperty(
       "--label-color",
       startup.stage === "Ẩm thực"
-        ? "var(--color-warning)"
+        ? "var(--color-food)"
         : startup.stage === "Du lịch"
-          ? "var(--color-accent-2)"
-          : "var(--color-success)",
+          ? "var(--color-sight)"
+          : "var(--color-home)",
     );
     button.innerHTML = `
       <img class="marker-label__logo" src="${escapeHtml(logoPath(startup))}" data-stage="${escapeHtml(startup.stage ?? "")}" alt="" loading="lazy" decoding="async" draggable="false">
@@ -2929,9 +3018,9 @@ function updateLabels() {
 // group's pins; tapping it again brings everything back.
 function renderPinLegend() {
   const entries = [
-    { stage: "Ẩm thực", css: "var(--color-warning)" },
-    { stage: "Du lịch", css: "var(--color-accent-2)" },
-    { stage: "BĐS", css: "var(--color-success)" },
+    { stage: "Ẩm thực", css: "var(--color-food)" },
+    { stage: "Du lịch", css: "var(--color-sight)" },
+    { stage: "BĐS", css: "var(--color-home)" },
   ];
   pinLegend.innerHTML = entries
     .map((entry) => {
@@ -3469,7 +3558,8 @@ function bindEvents() {
     const tag = document.activeElement?.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA") return;
 
-    // ↑ / ↓ cycle through every view, wrapping between Brooklyn and Whole Board.
+    // ↑ / ↓ đi vòng qua mọi khung nhìn, hết khu vực cuối thì quay lại
+    // "Toàn cảnh Hà Nội".
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const current = Math.max(0, AREAS.findIndex((a) => a.id === state.activeAreaId));
@@ -3966,7 +4056,7 @@ function applyEnvironment(env) {
   });
 
   // Mặt nước tối dần theo trời (giữ màu gốc để phục hồi).
-  const waterMats = new Set([materials.water, materials.pond]);
+  const waterMats = new Set([materials.water, materials.river, materials.pond]);
   waterSurfaces.forEach((w) => waterMats.add(w.material));
   waterMats.forEach((mat) => {
     if (!mat) return;
@@ -4201,7 +4291,7 @@ const STRINGS = {
     searchPlaceholder: "Tìm {n} địa điểm: phở, di tích, dự án, khu vực…",
     searchAria: "Tìm địa điểm",
     hint: "<kbd>↑</kbd><kbd>↓</kbd> khu vực · <kbd>⌘K</kbd> tìm kiếm · chạm vào pin",
-    credit: 'Dữ liệu chọn lọc thủ công · <a href="#/nguon" data-sources>Nguồn &amp; đối chiếu</a> · Dựng lại từ <a href="https://github.com/Nutlope/nyc-ai-atlas" target="_blank" rel="noreferrer">NYC AI Atlas</a> · 2026',
+    credit: 'Dữ liệu chọn lọc thủ công · <a href="#/nguon" data-sources>Nguồn &amp; đối chiếu</a> · Mã nguồn mở, giấy phép MIT · 2026',
     suggest: "Đề xuất địa điểm",
     onboardTitle: "Cách khám phá",
     onboardAreas: "Đi qua từng khu vực",
@@ -4346,7 +4436,7 @@ const STRINGS = {
     searchPlaceholder: "Search {n} places: phở, temples, projects, districts…",
     searchAria: "Search places",
     hint: "<kbd>↑</kbd><kbd>↓</kbd> areas · <kbd>⌘K</kbd> search · tap a pin",
-    credit: 'Hand-curated data · <a href="#/nguon" data-sources>Sources &amp; checks</a> · Rebuilt from <a href="https://github.com/Nutlope/nyc-ai-atlas" target="_blank" rel="noreferrer">NYC AI Atlas</a> · 2026',
+    credit: 'Hand-curated data · <a href="#/nguon" data-sources>Sources &amp; checks</a> · Open source, MIT licence · 2026',
     suggest: "Suggest a place",
     onboardTitle: "How to explore",
     onboardAreas: "Step through the areas",

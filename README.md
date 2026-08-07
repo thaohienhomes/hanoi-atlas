@@ -1,8 +1,8 @@
 # Hà Nội Atlas
 
-**Hà Nội Atlas** là bản đồ 3D tương tác của Hà Nội: 52 địa điểm **ẩm thực · du lịch · bất động sản**, khám phá theo 7 khu vực với camera bay như phim. Dựng lại (fork) từ [NYC AI Atlas](https://github.com/Nutlope/nyc-ai-atlas) của Nutlope — cùng engine Three.js, thay toàn bộ địa lý và dữ liệu bằng Hà Nội.
+**Hà Nội Atlas** là bản đồ 3D tương tác của Hà Nội: 52 địa điểm **ẩm thực · du lịch · bất động sản**, khám phá theo 7 khu vực với camera bay như phim. Bên cạnh đó là các lớp dữ liệu công dùng được hằng ngày: tra phường xã sau sáp nhập, vùng phát thải thấp, trạm sạc xe điện, sơ đồ quy hoạch khung 2045 — mỗi lớp đều dẫn được về văn bản gốc của nhà nước.
 
-*An interactive 3D map of Hanoi — 52 places to eat, explore, and live, across 7 flyable districts. Forked from Nutlope's NYC AI Atlas with the geography and dataset rebuilt for Hanoi.*
+*An interactive 3D map of Hanoi — 52 places to eat, explore, and live, across 7 flyable districts — plus civic data layers with citations back to the original government documents.*
 
 ## Bản đồ có gì / What it shows
 
@@ -133,8 +133,17 @@ Cột nhận diện linh hoạt (có dấu/không dấu/tiếng Anh): `Tên/name
 
 Toạ độ là vị trí xấp xỉ phục vụ bản đồ cách điệu, không phải dữ liệu trắc địa; các mục `source: "approx"` chỉ đúng đến mức khu phố. Giá cả chỉ mang tính tham khảo. Đề xuất địa điểm: nút **"Đề xuất địa điểm"** trong app.
 
+## Giấy phép / Licence
+
+**Mã nguồn theo giấy phép MIT** — xem [LICENSE](LICENSE). Dùng lại thoải mái, kể cả cho cơ quan nhà nước hay doanh nghiệp, chỉ cần giữ dòng bản quyền.
+
+**Dữ liệu thì không phải MIT.** Ranh giới 126 phường xã, vùng phát thải thấp và trạm sạc đều suy ra từ OpenStreetMap, mà OSM phát hành theo **ODbL 1.0** — giấy phép có điều khoản chia sẻ tương tự. Ai dùng lại những tệp đó phải giữ ODbL và ghi "© những người đóng góp OpenStreetMap". Danh sách tệp cụ thể nằm trong LICENSE. Ranh giới quận huyện cũ dùng cho lớp quy hoạch lấy từ geoBoundaries (CC BY 4.0).
+
+Phông Geist theo SIL OFL 1.1. Mô tả địa điểm, hình vẽ tay địa lý Hà Nội trong `src/geo.js` và bộ biểu tượng trong `public/logos` là do dự án tự làm.
+
 ## Credits
 
-- Engine & thiết kế tương tác: [NYC AI Atlas](https://github.com/Nutlope/nyc-ai-atlas) (Nutlope) — Vite + Three.js + vanilla JS.
-- Font: Geist (SIL OFL, self-hosted).
+- Xây dựng bằng [Three.js](https://threejs.org) và [Vite](https://vite.dev), không backend, không API key.
+- Nền bản đồ đường phố: [MapLibre GL JS](https://maplibre.org) + [OpenFreeMap](https://openfreemap.org).
+- Font: Geist (SIL OFL, tự host).
 - Dữ liệu địa điểm: chọn lọc thủ công, 2026.

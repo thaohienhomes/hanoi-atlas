@@ -15,9 +15,9 @@ const outDir = path.join(here, "..", "public", "logos");
 // Category background tints (slightly deeper than the pin colors so the
 // white glyphs pop at 16 px).
 const CATEGORY_BG = {
-  "Ẩm thực": "#dd9a1f",
-  "Du lịch": "#1fa99b",
-  BĐS: "#2f9c65",
+  "Ẩm thực": "#c1861f",
+  "Du lịch": "#0076a2",
+  BĐS: "#9e4c2e",
 };
 
 // ---- Glyphs (white, drawn in a 64×64 box) ----------------------------------

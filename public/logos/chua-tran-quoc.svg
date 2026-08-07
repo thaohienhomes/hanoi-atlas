@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Chùa Trấn Quốc">
-  <rect width="64" height="64" rx="14" fill="#1fa99b"/>
+  <rect width="64" height="64" rx="14" fill="#0076a2"/>
   <g fill="#ffffff">
     <rect x="29" y="8" width="6" height="5"/>
     <path d="M22 17h20l-2.5-4h-15Z"/><rect x="26" y="17" width="12" height="5"/>

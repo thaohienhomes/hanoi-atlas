@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="SVĐ Quốc gia Mỹ Đình">
-  <rect width="64" height="64" rx="14" fill="#1fa99b"/>
+  <rect width="64" height="64" rx="14" fill="#0076a2"/>
   <g fill="#ffffff">
     <path fill-rule="evenodd" d="M32 18c13.8 0 25 6.7 25 15s-11.2 15-25 15S7 41.3 7 33s11.2-15 25-15Zm0 7c-9.9 0-18 3.8-18 8s8.1 8 18 8 18-3.8 18-8-8.1-8-18-8Z"/>
     <ellipse cx="32" cy="33" rx="9" ry="4"/></g>

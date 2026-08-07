@@ -1,10 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <!-- Favicon: the atlas map-pin on a solid cobalt tile so it stays legible
-       at 16px on any tab background. Same mark as the nav logo. -->
-  <rect width="32" height="32" rx="7" fill="#2664ff" />
-  <path
-    fill="#ffffff"
-    fill-rule="evenodd"
-    d="M16 27.5 C12.6 22.2 8.5 16.8 8.5 12 A7.5 7.5 0 1 1 23.5 12 C23.5 16.8 19.4 22.2 16 27.5 Z M16 9.1 A2.9 2.9 0 1 0 16 14.9 A2.9 2.9 0 1 0 16 9.1 Z"
-  />
+  <!-- Khuê Văn Các — biểu tượng của Hà Nội, cũng là dấu hiệu của bản đồ này.
+       Rút gọn còn bốn nét đọc được ở 16px: mái hồi, ô cửa tròn, hai trụ, bệ. -->
+  <rect width="32" height="32" rx="7" fill="#006956" />
+  <g fill="#ffffff">
+    <path d="M16 5.4 L25 9.7 Q27.3 10.7 28.8 12.5 L3.2 12.5 Q4.7 10.7 7 9.7 Z" />
+    <path
+      fill-rule="evenodd"
+      d="M7.8 12.9 H24.2 V21.2 H7.8 Z M16 14 A3.2 3.2 0 1 0 16 20.4 A3.2 3.2 0 1 0 16 14 Z"
+    />
+    <path d="M9.6 21.6 H12.4 V26.6 H9.6 Z M19.6 21.6 H22.4 V26.6 H19.6 Z" />
+    <rect x="5.2" y="27" width="21.6" height="2.6" rx="0.9" />
+  </g>
 </svg>

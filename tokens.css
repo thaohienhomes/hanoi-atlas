@@ -1,63 +1,82 @@
-/* NYC AI Atlas · design tokens
-   One family (Geist variable), four type sizes, one accent, glass surfaces. */
+/* Hà Nội Atlas · biến thiết kế
+ *
+ * Bảng màu lấy từ chính thành phố chứ không lấy từ một bộ UI có sẵn:
+ *   giấy   — màu vôi ve tường nhà cũ, hơi ngả vàng chứ không trắng lạnh
+ *   mực    — đen ngả nâu, như mực nho trên giấy dó
+ *   nhấn   — xanh Hồ Gươm, cái màu lục thuỷ mà hồ được đặt tên theo
+ *   phụ    — màu ngói ta trên mái phố cổ
+ *   cảnh báo — vàng Hà Nội, màu vôi các dinh thự thời Pháp
+ *
+ * Hai điều chỉnh có lý do, không phải cho khác đi:
+ *   1. Cỡ chữ nhỏ nhất để 11.5px thay vì 11px. Tiếng Việt có dấu chồng
+ *      (ế, ộ, ữ, ợ) — ở 11px trên màn hình thường, dấu mũ và dấu thanh
+ *      dính vào nhau đọc rất mệt.
+ *   2. Có hẳn biến giãn dòng riêng, cũng vì lý do trên: dòng chữ Việt cần
+ *      thoáng hơn dòng chữ Anh cùng cỡ mới dễ đọc.
+ */
 :root {
-  /* color */
-  --color-paper: oklch(98.5% 0.004 250);
-  --color-paper-2: oklch(95.5% 0.008 250);
-  --color-paper-3: oklch(91% 0.012 252);
-  --color-ink: oklch(20% 0.024 258);
-  --color-ink-2: oklch(32% 0.02 258);
-  --color-muted: oklch(50% 0.02 258);
-  --color-rule: oklch(88% 0.012 252);
-  --color-accent: oklch(56% 0.21 256);
-  --color-accent-2: oklch(68% 0.16 206);
-  --color-accent-soft: oklch(56% 0.21 256 / 0.1);
-  --color-accent-ink: oklch(99% 0.003 250);
-  --color-success: oklch(58% 0.14 155);
-  --color-warning: oklch(70% 0.15 84);
-  --color-danger: oklch(58% 0.2 25);
-  --color-graphite: oklch(21% 0.016 260);
-  --color-water: oklch(47% 0.13 232);
-  --color-water-deep: oklch(30% 0.11 238);
-  --color-land: oklch(83% 0.04 92);
-  --color-land-2: oklch(76% 0.055 112);
-  --color-park: oklch(69% 0.12 142);
-  --color-road: oklch(29% 0.014 260);
-  --color-focus: oklch(62% 0.22 256);
+  /* --- nền và chữ --- */
+  --color-paper: oklch(98.2% 0.005 95);
+  --color-paper-2: oklch(95% 0.008 92);
+  --color-ink: oklch(22% 0.018 80);
+  --color-ink-2: oklch(34% 0.016 82);
+  --color-muted: oklch(52% 0.014 84);
+  --color-rule: oklch(88.5% 0.009 88);
 
-  /* glass */
-  --glass-bg: oklch(98.5% 0.004 250 / 0.58);
-  --glass-bg-strong: oklch(98.5% 0.004 250 / 0.8);
-  --glass-border: oklch(100% 0 0 / 0.55);
-  --glass-blur: blur(22px) saturate(1.35);
+  /* --- màu nhấn: xanh Hồ Gươm --- */
+  --color-accent: oklch(46% 0.095 176);
+  --color-accent-soft: oklch(46% 0.095 176 / 0.11);
+  --color-accent-ink: oklch(99% 0.004 95);
+  --color-focus: oklch(52% 0.12 176);
+
+  /* --- ba nhóm địa điểm, mỗi nhóm một sắc riêng của thành phố ---
+     Trước đây ba nhóm mượn tạm màu "cảnh báo" và "thành công", đọc mã rất
+     dễ nhầm. Giờ tách hẳn ra, và chọn bốn sắc đủ khác nhau để người mù màu
+     đỏ–lục vẫn phân biệt được: vàng, lam, cam gạch, trên nền nhấn lục. */
+  --color-food: oklch(72% 0.14 76);
+  --color-sight: oklch(58% 0.12 232);
+  --color-home: oklch(56% 0.13 40);
+
+  /* --- màu báo trạng thái --- */
+  --color-success: oklch(55% 0.12 155);
+  --color-warning: oklch(68% 0.13 78);
+  --color-danger: oklch(55% 0.19 27);
+
+  /* --- màu dùng trong cảnh 3D --- */
+  --color-graphite: oklch(23% 0.014 84);
+  --color-water-deep: oklch(33% 0.075 232);
+
+  /* --- mặt kính của HUD --- */
+  --glass-bg: oklch(98.2% 0.005 95 / 0.6);
+  --glass-bg-strong: oklch(98.2% 0.005 95 / 0.82);
+  --glass-border: oklch(100% 0 0 / 0.58);
+  --glass-blur: blur(20px) saturate(1.3);
   --glass-shadow:
-    0 24px 48px -16px oklch(20% 0.05 258 / 0.3),
-    inset 0 1px 0 oklch(100% 0 0 / 0.6);
+    0 22px 44px -14px oklch(22% 0.04 80 / 0.28),
+    inset 0 1px 0 oklch(100% 0 0 / 0.62);
 
-  /* type: one family (Geist variable), four sizes */
+  /* --- chữ --- */
   --font-sans: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-display: var(--font-sans);
-  --font-body: var(--font-sans);
-  --font-mono: var(--font-sans);
-  --fs-xl: 24px;
+  --fs-xl: 25px;
   --fs-md: 15px;
   --fs-sm: 13px;
-  --fs-xs: 11px;
+  --fs-xs: 11.5px;
+  --lh-tight: 1.24;
+  --lh-body: 1.58;
 
-  /* space & shape */
-  --space-2xs: 0.25rem;
+  /* --- khoảng cách và bo góc --- */
   --space-xs: 0.5rem;
   --space-sm: 0.75rem;
   --space-md: 1rem;
   --space-lg: 1.5rem;
-  --space-xl: 2rem;
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
-  --dur-short: 160ms;
-  --dur-med: 260ms;
-  --dur-long: 600ms;
   --radius-xs: 6px;
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
+  --radius-sm: 9px;
+  --radius-md: 13px;
+  --radius-lg: 17px;
+
+  /* --- chuyển động --- */
+  --ease-out: cubic-bezier(0.17, 0.92, 0.28, 1);
+  --dur-short: 150ms;
+  --dur-med: 250ms;
+  --dur-long: 580ms;
 }

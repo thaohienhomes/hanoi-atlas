@@ -284,25 +284,29 @@ const materials = {
   plane: solid(0xeef2f5, 0.4),
 };
 
+// Toạ độ địa lý → toạ độ cảnh. Trục z đảo dấu vì vĩ độ tăng về phía bắc còn
+// z trong Three.js tăng về phía người xem — không đảo thì thành phố lộn ngược
+// nam bắc.
 function project(lat, lng, y = 0) {
   return new THREE.Vector3((lng - CENTER.lng) * SCALE.lng, y, -(lat - CENTER.lat) * SCALE.lat);
 }
 
+const HTML_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" };
+
+// Mọi chuỗi do người khác nhập — tên địa điểm lấy từ Google Sheet chẳng hạn —
+// đều phải đi qua đây trước khi ghép vào innerHTML.
 function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch]);
 }
 
+// Chỉ cho qua http và https. Thiếu bước này thì một ô "website" trong Sheet
+// ghi javascript:... là chạy được mã lạ ngay trên trang.
 function safeUrl(value) {
   if (!value) return null;
-  const trimmed = String(value).trim();
-  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  const raw = String(value).trim();
+  const full = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
   try {
-    const url = new URL(withProtocol);
+    const url = new URL(full);
     return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
   } catch {
     return null;
@@ -555,32 +559,43 @@ function addLandmarkLabel(name, lat, lng, y = 3) {
   landmarkLabelElements.push({ el, point: { lat, lng, y } });
 }
 
-// Queue a tree to be built later in one batched instanced draw.
-function addTree(lat, lng, random, { type, scaleBase = 1 } = {}) {
-  const p = project(lat, lng);
+/* ---------- Cây xanh ---------- */
+
+// Cây không dựng ngay mà xếp vào hàng đợi, cuối cùng gộp thành vài lưới
+// instanced. Vài nghìn cái cây mà mỗi cái một mesh riêng thì trình duyệt
+// chết ngay từ lúc mở trang.
+function queueTree(x, z, random, { type, scale, spread = 0 } = {}) {
   treeBuffer.push({
-    x: p.x,
-    z: p.z,
+    x: x + (spread ? (random() - 0.5) * spread : 0),
+    z: z + (spread ? (random() - 0.5) * spread : 0),
     type: type || (random() < 0.42 ? "conifer" : "round"),
-    scale: scaleBase * (0.62 + random() * 0.7),
+    scale,
     rot: random() * Math.PI,
     colorIndex: Math.floor(random() * GREEN_PALETTE.length),
   });
 }
 
-// Fill a polygon with trees at a given target count; optional water exclusion.
+function addTree(lat, lng, random, { type, scaleBase = 1 } = {}) {
+  const p = project(lat, lng);
+  queueTree(p.x, p.z, random, { type, scale: scaleBase * (0.62 + random() * 0.7) });
+}
+
+// Rải cây vào trong một đa giác cho tới khi đủ số lượng. `guard` chặn vòng
+// lặp vô tận với những đa giác gầy quá, hộp bao rộng mà lòng thì hẹp — bốc
+// điểm ngẫu nhiên mãi mà chẳng trúng vào trong.
 function scatterTreesInPoly(poly, count, random, opts = {}) {
-  const lats = poly.map((c) => c[0]);
-  const lngs = poly.map((c) => c[1]);
-  const minLat = Math.min(...lats);
-  const maxLat = Math.max(...lats);
-  const minLng = Math.min(...lngs);
-  const maxLng = Math.max(...lngs);
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  let minLng = Infinity;
+  let maxLng = -Infinity;
+  for (const [lat, lng] of poly) {
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lng < minLng) minLng = lng;
+    if (lng > maxLng) maxLng = lng;
+  }
   let placed = 0;
-  let guard = 0;
-  const cap = count * 20;
-  while (placed < count && guard < cap) {
-    guard += 1;
+  for (let guard = 0; placed < count && guard < count * 20; guard += 1) {
     const lat = minLat + random() * (maxLat - minLat);
     const lng = minLng + random() * (maxLng - minLng);
     if (!pointInPoly(lat, lng, poly)) continue;
@@ -590,21 +605,22 @@ function scatterTreesInPoly(poly, count, random, opts = {}) {
   }
 }
 
-// Build every queued tree into three instanced meshes (cones, blobs, trunks).
-// Street-tree rows where Hanoians would expect them: Phan Đình Phùng,
-// Hoàng Diệu, Thanh Niên, Kim Mã, and the river dyke road.
+// Những hàng cây mà người Hà Nội mặc định phải có. Đây là các con phố nổi
+// tiếng vì bóng cây chứ không phải vì kiến trúc: sấu Phan Đình Phùng, xà cừ
+// Hoàng Diệu, hàng cây ven Hồ Tây đường Thanh Niên, và hàng cây trên đê.
+const TREE_ROWS = [
+  { from: [21.0402, 105.8392], to: [21.0426, 105.8472], step: 0.42 }, // Phan Đình Phùng
+  { from: [21.0398, 105.8397], to: [21.0422, 105.8477], step: 0.42 }, // Phan Đình Phùng, hàng bên kia
+  { from: [21.0302, 105.8372], to: [21.0398, 105.8382], step: 0.5 }, // Hoàng Diệu
+  { from: [21.0424, 105.8388], to: [21.0492, 105.8348], step: 0.45 }, // Thanh Niên
+  { from: [21.0304, 105.8028], to: [21.0338, 105.8298], step: 0.7 }, // Kim Mã
+  { from: [21.0555, 105.8458], to: [21.0295, 105.8598], step: 0.8 }, // đê Yên Phụ – Trần Quang Khải
+  { from: [21.0175, 105.842], to: [21.0255, 105.8408], step: 0.55 }, // Lê Duẩn
+];
+
 function createStreetTrees() {
-  const rows = [
-    { from: [21.0402, 105.8392], to: [21.0426, 105.8472], step: 0.42 }, // Phan Đình Phùng
-    { from: [21.0398, 105.8397], to: [21.0422, 105.8477], step: 0.42 }, // Phan Đình Phùng, hàng kép
-    { from: [21.0302, 105.8372], to: [21.0398, 105.8382], step: 0.5 }, // Hoàng Diệu
-    { from: [21.0424, 105.8388], to: [21.0492, 105.8348], step: 0.45 }, // Thanh Niên
-    { from: [21.0304, 105.8028], to: [21.0338, 105.8298], step: 0.7 }, // Kim Mã
-    { from: [21.0555, 105.8458], to: [21.0295, 105.8598], step: 0.8 }, // đê Yên Phụ – Trần Quang Khải
-    { from: [21.0175, 105.842], to: [21.0255, 105.8408], step: 0.55 }, // Lê Duẩn
-  ];
   const random = seededRandom(9001);
-  rows.forEach((row) => {
+  for (const row of TREE_ROWS) {
     const a = project(row.from[0], row.from[1]);
     const b = project(row.to[0], row.to[1]);
     const count = Math.max(2, Math.floor(a.distanceTo(b) / row.step));
@@ -612,85 +628,82 @@ function createStreetTrees() {
       const t = i / count;
       const lat = row.from[0] + (row.to[0] - row.from[0]) * t;
       const lng = row.from[1] + (row.to[1] - row.from[1]) * t;
+      // Bỏ qua cây rơi xuống nước hoặc ra ngoài bờ hữu.
       if (!pointInPoly(lat, lng, WEST_BANK)) continue;
       if (LAKES.some((lake) => pointInPoly(lat, lng, lake))) continue;
       const p = project(lat, lng);
-      treeBuffer.push({
-        x: p.x + (random() - 0.5) * 0.16,
-        z: p.z + (random() - 0.5) * 0.16,
-        type: "round",
-        scale: 0.48 + random() * 0.24,
-        rot: random() * Math.PI,
-        colorIndex: Math.floor(random() * GREEN_PALETTE.length),
-      });
+      // Hàng cây thẳng tắp trông giả, xô lệch mỗi cây một chút cho tự nhiên.
+      queueTree(p.x, p.z, random, { type: "round", scale: 0.48 + random() * 0.24, spread: 0.16 });
     }
-  });
+  }
 }
 
+// Dựng toàn bộ hàng đợi thành lưới instanced: cây lá kim một lưới, cây tán
+// tròn tách làm hai lưới thân và tán vì hai vật liệu khác nhau.
 function buildTrees() {
   if (!treeBuffer.length) return;
-  const conifers = treeBuffer.filter((t) => t.type === "conifer");
-  const rounds = treeBuffer.filter((t) => t.type === "round");
 
   const matrix = new THREE.Matrix4();
   const quat = new THREE.Quaternion();
   const scl = new THREE.Vector3();
   const pos = new THREE.Vector3();
-  const col = new THREE.Color();
+  const tint = new THREE.Color();
 
-  if (conifers.length) {
-    const geo = new THREE.ConeGeometry(0.16, 0.62, 6);
-    const mesh = new THREE.InstancedMesh(geo, materials.treeLeaf, conifers.length);
+  const instanced = (geometry, material, count) => {
+    const mesh = new THREE.InstancedMesh(geometry, material, count);
     mesh.castShadow = true;
-    conifers.forEach((t, i) => {
-      pos.set(t.x, 0.31 * t.scale + 0.05, t.z);
-      quat.setFromAxisAngle(UP, t.rot);
-      scl.setScalar(t.scale);
+    return mesh;
+  };
+
+  const conifers = treeBuffer.filter((t) => t.type === "conifer");
+  if (conifers.length) {
+    const mesh = instanced(new THREE.ConeGeometry(0.16, 0.62, 6), materials.treeLeaf, conifers.length);
+    conifers.forEach((tree, i) => {
+      pos.set(tree.x, 0.31 * tree.scale + 0.05, tree.z);
+      quat.setFromAxisAngle(UP, tree.rot);
+      scl.setScalar(tree.scale);
       matrix.compose(pos, quat, scl);
       mesh.setMatrixAt(i, matrix);
-      col.copy(GREEN_PALETTE[t.colorIndex]);
-      mesh.setColorAt(i, col);
+      mesh.setColorAt(i, tint.copy(GREEN_PALETTE[tree.colorIndex]));
     });
     scene.add(mesh);
   }
 
+  const rounds = treeBuffer.filter((t) => t.type === "round");
   if (rounds.length) {
-    const leafGeo = new THREE.IcosahedronGeometry(0.24, 0);
-    const leafMesh = new THREE.InstancedMesh(leafGeo, materials.treeLeaf, rounds.length);
-    leafMesh.castShadow = true;
-    const trunkGeo = new THREE.CylinderGeometry(0.035, 0.05, 0.22, 5);
-    const trunkMesh = new THREE.InstancedMesh(trunkGeo, materials.treeTrunk, rounds.length);
-    trunkMesh.castShadow = true;
-    rounds.forEach((t, i) => {
-      const trunkH = 0.2 * t.scale;
-      pos.set(t.x, trunkH / 2 + 0.05, t.z);
-      quat.setFromAxisAngle(UP, 0);
-      scl.set(t.scale, t.scale, t.scale);
-      matrix.compose(pos, quat, scl);
-      trunkMesh.setMatrixAt(i, matrix);
+    const leaves = instanced(new THREE.IcosahedronGeometry(0.24, 0), materials.treeLeaf, rounds.length);
+    const trunks = instanced(new THREE.CylinderGeometry(0.035, 0.05, 0.22, 5), materials.treeTrunk, rounds.length);
+    rounds.forEach((tree, i) => {
+      const trunkHeight = 0.2 * tree.scale;
 
-      pos.set(t.x, trunkH + 0.2 * t.scale + 0.05, t.z);
-      quat.setFromAxisAngle(UP, t.rot);
-      scl.set(t.scale, t.scale * 0.92, t.scale);
+      pos.set(tree.x, trunkHeight / 2 + 0.05, tree.z);
+      quat.identity();
+      scl.setScalar(tree.scale);
       matrix.compose(pos, quat, scl);
-      leafMesh.setMatrixAt(i, matrix);
-      col.copy(GREEN_PALETTE[t.colorIndex]);
-      leafMesh.setColorAt(i, col);
+      trunks.setMatrixAt(i, matrix);
+
+      pos.set(tree.x, trunkHeight + 0.2 * tree.scale + 0.05, tree.z);
+      quat.setFromAxisAngle(UP, tree.rot);
+      // Bẹt tán xuống một chút: khối hai mươi mặt tròn xoe trông như quả bóng.
+      scl.set(tree.scale, tree.scale * 0.92, tree.scale);
+      matrix.compose(pos, quat, scl);
+      leaves.setMatrixAt(i, matrix);
+      leaves.setColorAt(i, tint.copy(GREEN_PALETTE[tree.colorIndex]));
     });
-    scene.add(trunkMesh);
-    scene.add(leafMesh);
+    scene.add(trunks);
+    scene.add(leaves);
   }
 }
 
-// Low-poly faceted grass mound for gentle, rolling terrain.
+// Gò cỏ ít mặt, tạo địa hình gợn nhẹ trong công viên. Đặt xích đạo của khối
+// cầu trùng mặt cỏ nên chỉ phần chỏm nhô lên thành gò.
 function createHill(lat, lng, radius, height, tint = 0) {
-  const geo = new THREE.IcosahedronGeometry(1, 1);
-  const mat = materials.hill.clone();
-  if (tint) mat.color.offsetHSL(0, 0, tint);
-  const mesh = new THREE.Mesh(geo, mat);
+  const material = materials.hill.clone();
+  if (tint) material.color.offsetHSL(0, 0, tint);
+  const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 1), material);
   const p = project(lat, lng);
   mesh.scale.set(radius, height, radius);
-  mesh.position.set(p.x, 0.05, p.z); // equator at the grass plane; cap forms the hill
+  mesh.position.set(p.x, 0.05, p.z);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   scene.add(mesh);
@@ -821,16 +834,14 @@ const GRID = (() => {
 // phố cổ chia lô theo chiều sâu thửa ruộng cũ, ngang chỉ vài mét.
 const CELL_U = 0.0009; // ~100 m giữa hai phố chạy đông–tây
 const CELL_V = 0.0016; // ~170 m giữa hai phố chạy bắc–nam
+// Hai véc-tơ cạnh của một ô phố, đo một lần lúc khởi động rồi dùng lại khắp
+// nơi: nhà, tấm lát vỉa hè, làn xe và người đi bộ đều bám theo chúng, nên
+// mọi thứ tự khớp vào cùng một lưới phố mà không phải tính lại.
 const GRID_METRICS = (() => {
-  const gridOrigin = project(GRID.origin.lat, GRID.origin.lng);
-  const uVec = project(
-    GRID.origin.lat + GRID.av.dlat * CELL_U,
-    GRID.origin.lng + GRID.av.dlng * CELL_U,
-  ).sub(gridOrigin); // short block side (street to street)
-  const vVec = project(
-    GRID.origin.lat + GRID.st.dlat * CELL_V,
-    GRID.origin.lng + GRID.st.dlng * CELL_V,
-  ).sub(gridOrigin); // long block side (avenue to avenue)
+  const origin = project(GRID.origin.lat, GRID.origin.lng);
+  const edge = (d, step) => project(GRID.origin.lat + d.dlat * step, GRID.origin.lng + d.dlng * step).sub(origin);
+  const uVec = edge(GRID.av, CELL_U); // cạnh ngắn: từ phố này sang phố kia
+  const vVec = edge(GRID.st, CELL_V); // cạnh dài: từ đại lộ này sang đại lộ kia
   return {
     uVec,
     vVec,
@@ -908,97 +919,107 @@ function createBridgeDetails() {
   });
 }
 
+/* ---------- Đường sắt đô thị ---------- */
+
+// Ba toa nối nhau, thân trắng có dải màu theo tuyến. Không cần chi tiết hơn
+// vì ở cỡ này đoàn tàu chỉ dài chừng hai centimet trên màn hình.
 function createSubwayTrainMesh(color = 0x169b62) {
   const group = new THREE.Group();
-  const carMaterial = new THREE.MeshStandardMaterial({ color: 0xe6eaec, roughness: 0.34, metalness: 0.1 });
-  const stripeMaterial = new THREE.MeshStandardMaterial({
+  const shell = new THREE.MeshStandardMaterial({ color: 0xe6eaec, roughness: 0.34, metalness: 0.1 });
+  const stripe = new THREE.MeshStandardMaterial({
     color,
     roughness: 0.4,
     emissive: new THREE.Color(color).multiplyScalar(0.2),
   });
-  for (let i = 0; i < 3; i += 1) {
-    const car = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.18, 0.62), carMaterial);
-    car.position.z = (i - 1) * 0.66;
-    car.position.y = 0.14;
+  const CARS = 3;
+  const GAP = 0.66;
+  for (let i = 0; i < CARS; i += 1) {
+    const z = (i - (CARS - 1) / 2) * GAP;
+    const car = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.18, 0.62), shell);
+    car.position.set(0, 0.14, z);
     car.castShadow = true;
     group.add(car);
 
-    const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.035, 0.5), stripeMaterial);
-    stripe.position.set(0, 0.2, (i - 1) * 0.66);
-    group.add(stripe);
+    const band = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.035, 0.5), stripe);
+    band.position.set(0, 0.2, z);
+    group.add(band);
   }
   group.scale.setScalar(0.7);
   return group;
 }
 
-// Hanoi's two metro lines run entirely on elevated viaducts; the national
-// railway hugs the ground, then climbs onto Long Biên bridge over the river.
+// Hai tuyến metro của Hà Nội chạy trên cao suốt tuyến; đường sắt quốc gia
+// thì bò dưới đất rồi leo lên mặt cầu Long Biên để vượt sông.
 const VIADUCT_Y = 0.58;
 const RAIL_BRIDGE_Y = 0.68;
+const TRACK_STEP = 0.9;
 
 function trackY(line, lat, lng, baseY) {
   if (line.mode === "viaduct") return VIADUCT_Y;
-  // "rail": ground ribbon on land, Long Biên deck height over the water.
   return inWater(lat, lng) ? RAIL_BRIDGE_Y : baseY;
 }
 
-// Densely resampled route with a real vertical profile: viaducts across the
-// city, the railway rising onto the old bridge.
+// Lấy mẫu dày dọc tuyến để có mặt cắt đứng thật: đoạn nào trên cao thì giữ
+// lại riêng, vì còn phải dựng trụ đỡ bên dưới.
 function subwayProfile(line, baseY) {
   const points = [];
   const elevated = [];
   const stops = line.stops;
+  const push = (lat, lng) => {
+    const y = trackY(line, lat, lng, baseY);
+    const point = project(lat, lng, y);
+    points.push(point);
+    if (y === VIADUCT_Y) elevated.push(point);
+  };
   for (let s = 0; s < stops.length - 1; s += 1) {
     const [aLat, aLng] = stops[s];
     const [bLat, bLng] = stops[s + 1];
-    const segs = Math.max(2, Math.round(project(aLat, aLng).distanceTo(project(bLat, bLng)) / 0.9));
+    const span = project(aLat, aLng).distanceTo(project(bLat, bLng));
+    const segs = Math.max(2, Math.round(span / TRACK_STEP));
     for (let k = 0; k < segs; k += 1) {
       const t = k / segs;
-      const lat = aLat + (bLat - aLat) * t;
-      const lng = aLng + (bLng - aLng) * t;
-      const y = trackY(line, lat, lng, baseY);
-      const point = project(lat, lng, y);
-      points.push(point);
-      if (y === VIADUCT_Y) elevated.push(point);
+      push(aLat + (bLat - aLat) * t, aLng + (bLng - aLng) * t);
     }
   }
   const [lastLat, lastLng] = stops[stops.length - 1];
-  points.push(project(lastLat, lastLng, trackY(line, lastLat, lastLng, baseY)));
+  push(lastLat, lastLng);
   return { points, elevated };
 }
 
 function createSubwayLayer() {
-  // MTA-diagram styling: white station discs with a dark rim over the
-  // colored route lines.
-  const stationMaterial = new THREE.MeshStandardMaterial({
+  // Nhà ga vẽ theo lối sơ đồ tàu điện: đĩa trắng viền sẫm nằm trên vạch màu
+  // của tuyến, đọc được ngay cả khi thu nhỏ hết cỡ.
+  const diskFace = new THREE.MeshStandardMaterial({
     color: 0xf6f7f4,
     roughness: 0.4,
     emissive: new THREE.Color(0x1a1a1a),
   });
-  const stationRimMaterial = new THREE.MeshStandardMaterial({ color: 0x22262e, roughness: 0.6 });
-  const stationGeo = new THREE.CylinderGeometry(0.095, 0.095, 0.05, 16);
-  const stationRimGeo = new THREE.CylinderGeometry(0.13, 0.13, 0.036, 16);
+  const diskRim = new THREE.MeshStandardMaterial({ color: 0x22262e, roughness: 0.6 });
+  const diskGeo = new THREE.CylinderGeometry(0.095, 0.095, 0.05, 16);
+  const rimGeo = new THREE.CylinderGeometry(0.13, 0.13, 0.036, 16);
   const pierGeo = new THREE.CylinderGeometry(0.032, 0.05, 1, 8);
   const pierMaterial = new THREE.MeshStandardMaterial({ color: 0x4b5158, roughness: 0.7 });
 
   METRO_LINES.forEach((line, lineIndex) => {
-    const lineMaterial = new THREE.MeshStandardMaterial({
+    const rail = new THREE.MeshStandardMaterial({
       color: line.color,
       roughness: 0.45,
       emissive: new THREE.Color(line.color).multiplyScalar(0.3),
     });
-    const y = 0.05 + lineIndex * 0.007; // tiny stagger so overlapping lines don't z-fight
-    const { points, elevated } = subwayProfile(line, y);
-    const curve = new THREE.CatmullRomCurve3(points);
+    // Nhích mỗi tuyến lên một chút để chỗ hai tuyến chồng nhau không tranh
+    // nhau chiều sâu rồi nhấp nháy.
+    const baseY = 0.05 + lineIndex * 0.007;
+    const { points, elevated } = subwayProfile(line, baseY);
+
     const track = new THREE.Mesh(
-      new THREE.TubeGeometry(curve, points.length * 3, 0.04, 8, false),
-      lineMaterial,
+      new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points), points.length * 3, 0.04, 8, false),
+      rail,
     );
     track.castShadow = true;
     track.receiveShadow = true;
     scene.add(track);
 
-    // Viaduct piers hold the elevated stretches up.
+    // Trụ đỡ đoạn trên cao, cách một điểm dựng một cái cho đỡ dày.
     elevated.forEach((point, index) => {
       if (index % 2 !== 0) return;
       const pier = new THREE.Mesh(pierGeo, pierMaterial);
@@ -1008,24 +1029,25 @@ function createSubwayLayer() {
       scene.add(pier);
     });
 
-    line.stops.forEach(([lat, lng]) => {
-      const stationY = trackY(line, lat, lng, y);
-      if (stationY < 0 || inWater(lat, lng)) return; // no station discs over the river
+    for (const [lat, lng] of line.stops) {
+      const stationY = trackY(line, lat, lng, baseY);
+      // Không cắm đĩa nhà ga giữa lòng sông.
+      if (stationY < 0 || inWater(lat, lng)) continue;
       const p = project(lat, lng, stationY + 0.035);
-      const rim = new THREE.Mesh(stationRimGeo, stationRimMaterial);
+      const rim = new THREE.Mesh(rimGeo, diskRim);
       rim.position.copy(p);
       scene.add(rim);
-      const disk = new THREE.Mesh(stationGeo, stationMaterial);
-      disk.position.copy(p);
-      disk.position.y += 0.02;
-      scene.add(disk);
-    });
+      const face = new THREE.Mesh(diskGeo, diskFace);
+      face.position.copy(p);
+      face.position.y += 0.02;
+      scene.add(face);
+    }
 
-    // One train per line; the long trunk lines run a second. Trains ride the
-    // same profile, so the metro glides along its viaduct and the old diesel
-    // train climbs Long Biên bridge.
-    const trainCount = line.stops.length >= 8 ? 2 : 1;
-    for (let i = 0; i < trainCount; i += 1) {
+    // Mỗi tuyến một đoàn tàu, tuyến dài thì hai. Tàu chạy trên đúng mặt cắt
+    // vừa dựng, nên metro lướt trên cầu cạn còn tàu hoả cũ thì leo cầu Long
+    // Biên y như ngoài đời.
+    const trains = line.stops.length >= 8 ? 2 : 1;
+    for (let i = 0; i < trains; i += 1) {
       const train = createSubwayTrainMesh(line.color);
       scene.add(train);
       subwayFleet.push({
@@ -1041,123 +1063,125 @@ function createSubwayLayer() {
   addLandmarkLabel("Ga Cát Linh", 21.0293, 105.8237, 1.5);
 }
 
+/* ---------- Thuyền bè trên sông và hồ ---------- */
+
 function createFerryMesh(accent = 0x2e6cff) {
   const group = new THREE.Group();
-  const hullMaterial = new THREE.MeshStandardMaterial({ color: accent, roughness: 0.42 });
-  const cabinMaterial = materials.ferry;
-  const hull = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.16, 1.3), hullMaterial);
+  const hullPaint = new THREE.MeshStandardMaterial({ color: accent, roughness: 0.42 });
+
+  const hull = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.16, 1.3), hullPaint);
   hull.position.y = 0.12;
   hull.castShadow = true;
   group.add(hull);
 
-  const cabin = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.28, 0.6), cabinMaterial);
+  const cabin = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.28, 0.6), materials.ferry);
   cabin.position.y = 0.34;
   cabin.castShadow = true;
   group.add(cabin);
 
-  const bow = new THREE.Mesh(new THREE.ConeGeometry(0.36, 0.42, 4), hullMaterial);
-  bow.rotation.x = Math.PI / 2;
-  bow.rotation.z = Math.PI / 4;
+  // Mũi thuyền: khối chóp bốn mặt xoay 45° để hai cạnh chụm thành mũi nhọn.
+  const bow = new THREE.Mesh(new THREE.ConeGeometry(0.36, 0.42, 4), hullPaint);
+  bow.rotation.set(Math.PI / 2, 0, Math.PI / 4);
   bow.position.set(0, 0.12, 0.82);
   group.add(bow);
+
   group.scale.setScalar(0.86);
   return group;
 }
 
+const BOAT_ROUTES = [
+  {
+    // Xà lan chở cát ngược dòng chính sông Hồng, phía tây bãi giữa.
+    color: 0x8a5f46,
+    scale: 1,
+    path: [
+      [20.988, 105.876], [21.008, 105.87], [21.025, 105.8655], [21.038, 105.8618],
+      [21.048, 105.856], [21.058, 105.85], [21.066, 105.844],
+    ],
+  },
+  {
+    // Thuyền du lịch lượn vòng nhánh đông, qua chân cầu Long Biên.
+    color: 0x2e6cff,
+    scale: 0.8,
+    path: [
+      [21.033, 105.864], [21.039, 105.869], [21.0445, 105.8695], [21.0505, 105.8645],
+      [21.056, 105.8575], [21.052, 105.8545], [21.0455, 105.8595], [21.038, 105.8625],
+      [21.033, 105.864],
+    ],
+  },
+  {
+    // Thiên nga đạp vịt lững thững trên Hồ Tây.
+    color: 0xf4f1e8,
+    scale: 0.55,
+    path: [
+      [21.052, 105.818], [21.056, 105.824], [21.06, 105.829], [21.056, 105.832],
+      [21.05, 105.83], [21.047, 105.824], [21.052, 105.818],
+    ],
+  },
+];
+
 function createFerries() {
-  const routes = [
-    {
-      // Sand barge working up the Red River's main channel, west of bãi giữa.
-      color: 0x8a5f46,
-      scale: 1,
-      path: [
-        [20.988, 105.876],
-        [21.008, 105.87],
-        [21.025, 105.8655],
-        [21.038, 105.8618],
-        [21.048, 105.856],
-        [21.058, 105.85],
-        [21.066, 105.844],
-      ],
-    },
-    {
-      // Tourist boat looping the east channel past Long Biên bridge.
-      color: 0x2e6cff,
-      scale: 0.8,
-      path: [
-        [21.033, 105.864],
-        [21.039, 105.869],
-        [21.0445, 105.8695],
-        [21.0505, 105.8645],
-        [21.056, 105.8575],
-        [21.052, 105.8545],
-        [21.0455, 105.8595],
-        [21.038, 105.8625],
-        [21.033, 105.864],
-      ],
-    },
-    {
-      // Swan pedal boat drifting on Hồ Tây.
-      color: 0xf4f1e8,
-      scale: 0.55,
-      path: [
-        [21.052, 105.818],
-        [21.056, 105.824],
-        [21.06, 105.829],
-        [21.056, 105.832],
-        [21.05, 105.83],
-        [21.047, 105.824],
-        [21.052, 105.818],
-      ],
-    },
-  ];
-  routes.forEach((route, index) => {
-    const points = route.path.map(([lat, lng]) => project(lat, lng, 0.1));
+  BOAT_ROUTES.forEach((route, index) => {
     const mesh = createFerryMesh(route.color);
     mesh.add(createWake());
     mesh.scale.setScalar(0.86 * (route.scale ?? 1));
     scene.add(mesh);
-    ferryFleet.push({ mesh, path: points, t: index * 0.43, speed: 0.009 + index * 0.003, lane: 0 });
+    ferryFleet.push({
+      mesh,
+      path: route.path.map(([lat, lng]) => project(lat, lng, 0.1)),
+      t: index * 0.43,
+      speed: 0.009 + index * 0.003,
+      lane: 0,
+    });
   });
 }
 
-// A soft white trail that rides behind each ferry; static texture, no
-// per-frame updates, it just travels with its parent.
+// Vệt nước trắng kéo sau đuôi thuyền. Là con của chính con thuyền nên nó tự
+// đi theo, không phải cập nhật gì mỗi khung hình.
 function createWake() {
-  const c = document.createElement("canvas");
-  c.width = 64;
-  c.height = 128;
-  const ctx = c.getContext("2d");
-  // After the plane is laid flat (rotation.x = -PI/2) the canvas bottom edge
-  // faces the stern, so the bright end of the trail lives at y = 128.
-  const grad = ctx.createLinearGradient(0, 0, 0, 128);
-  grad.addColorStop(0, "rgba(255,255,255,0)");
-  grad.addColorStop(0.65, "rgba(255,255,255,0.3)");
-  grad.addColorStop(1, "rgba(255,255,255,0.75)");
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, 64, 128);
-  const tex = new THREE.CanvasTexture(c);
+  const W = 64;
+  const H = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d");
+  // Sau khi tấm phẳng được lật nằm ngang (rotation.x = -PI/2), cạnh dưới của
+  // canvas quay về phía đuôi thuyền, nên đầu đậm của vệt nằm ở y = H.
+  const fade = ctx.createLinearGradient(0, 0, 0, H);
+  fade.addColorStop(0, "rgba(255,255,255,0)");
+  fade.addColorStop(0.65, "rgba(255,255,255,0.3)");
+  fade.addColorStop(1, "rgba(255,255,255,0.75)");
+  ctx.fillStyle = fade;
+  ctx.fillRect(0, 0, W, H);
+
   const wake = new THREE.Mesh(
     new THREE.PlaneGeometry(0.42, 1.7),
-    new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.55, depthWrite: false }),
+    new THREE.MeshBasicMaterial({
+      map: new THREE.CanvasTexture(canvas),
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+    }),
   );
   wake.rotation.x = -Math.PI / 2;
   wake.position.set(0, -0.05, -1.25);
   return wake;
 }
 
+/* ---------- Máy bay lên xuống Nội Bài ---------- */
+
 function createPlaneMesh() {
   const group = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.22, 1.6), materials.plane);
-  body.castShadow = true;
-  group.add(body);
-  const wing = new THREE.Mesh(new THREE.BoxGeometry(1.45, 0.05, 0.34), materials.plane);
-  wing.position.z = -0.08;
-  group.add(wing);
-  const tail = new THREE.Mesh(new THREE.BoxGeometry(0.65, 0.05, 0.22), materials.plane);
-  tail.position.z = -0.66;
-  tail.position.y = 0.16;
-  group.add(tail);
+  for (const [w, h, d, y, z, shadow] of [
+    [0.22, 0.22, 1.6, 0, 0, true], // thân
+    [1.45, 0.05, 0.34, 0, -0.08, false], // cánh chính
+    [0.65, 0.05, 0.22, 0.16, -0.66, false], // cánh đuôi
+  ]) {
+    const part = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), materials.plane);
+    part.position.set(0, y, z);
+    part.castShadow = shadow;
+    group.add(part);
+  }
   group.scale.setScalar(0.9);
   return group;
 }
@@ -1189,11 +1213,11 @@ function createPlanes() {
   });
 }
 
-// Streets ARE the gaps between the sidewalk block plates, so traffic paths
-// are generated on the same lattice the buildings use: every avenue with
-// enough land under it, the major crosstown streets, the two shoreline
-// highways, and the bridge decks. Every path is clipped to land, so cars
-// never drive through buildings, parks, or water.
+  // Đường CHÍNH LÀ khe hở giữa các tấm lát vỉa hè, nên tuyến xe chạy được
+  // sinh trên đúng cái lưới mà nhà cửa bám vào: mọi đại lộ có đủ đất bên
+  // dưới, các phố ngang lớn, hai trục ven sông, và mặt cầu. Mọi tuyến đều bị
+  // cắt theo ranh đất, nhờ vậy xe không bao giờ chạy xuyên nhà, xuyên công
+  // viên hay lao xuống nước.
 const ROAD_Y = 0.055;
 
 function streetAllowed(lat, lng) {
@@ -1254,7 +1278,7 @@ function createStreetNetwork() {
     paths.push(boulevard.path.map(([lat, lng]) => project(lat, lng, ROAD_Y)));
   });
 
-  // Bridge decks carry their own traffic, up at deck height.
+  // Mặt cầu có luồng xe riêng, chạy ở cao độ của mặt cầu chứ không phải mặt đất.
   BRIDGES.forEach((bridge) => {
     paths.push(bridge.deck.map(([lat, lng]) => project(lat, lng, 0.72)));
   });
@@ -1263,31 +1287,28 @@ function createStreetNetwork() {
   return paths;
 }
 
+// Nhà chỉ được mọc trên đất khô của bờ hữu, không đè lên hồ, không đè lên
+// công viên hay khuôn viên di tích. Ba phép loại này chạy cho từng ô lưới
+// nên viết theo kiểu thoát sớm, kiểm tra rẻ trước, đắt sau.
 function buildingAllowed(lat, lng) {
-  // Must be on a real landmass (bãi giữa stays unbuilt — it's farmland)...
-  const onLand = pointInPoly(lat, lng, WEST_BANK) || pointInPoly(lat, lng, EAST_BANK);
-  if (!onLand) return false;
-  // ...and not in a lake...
-  for (const lake of LAKES) {
-    if (pointInPoly(lat, lng, lake)) return false;
-  }
-  for (const f of LAKE_FEATURES) {
-    if (f.kind === "water" && inEllipse(lat, lng, f)) return false;
-  }
-  // ...and not inside a park or monument ground.
-  for (const park of PARKS) {
-    if (pointInPoly(lat, lng, park)) return false;
-  }
+  // Phải đứng trên đất thật của một trong hai bờ. Bãi giữa cố ý không tính:
+  // ngoài đời đó là đất bãi trồng chuối trồng rau, không có nhà.
+  if (!pointInPoly(lat, lng, WEST_BANK) && !pointInPoly(lat, lng, EAST_BANK)) return false;
+  if (LAKES.some((lake) => pointInPoly(lat, lng, lake))) return false;
+  if (LAKE_FEATURES.some((f) => f.kind === "water" && inEllipse(lat, lng, f))) return false;
+  if (PARKS.some((park) => pointInPoly(lat, lng, park))) return false;
   return true;
 }
 
-// Bake a "street canyon" gradient into a unit box: vertices near the base get
-// darker vertex colors, which multiply with per-instance colors for free
-// ambient-occlusion-style grounding (no per-frame cost).
+// Nướng sẵn dải tối chân tường vào một khối hộp đơn vị: đỉnh nào gần mặt
+// đất thì màu đỉnh sẫm hơn. Màu này nhân với màu riêng của từng nhà, cho ra
+// hiệu ứng bóng đổ góc phố miễn phí — không tốn gì mỗi khung hình, mà cả
+// dãy phố lập tức có chân, thay vì trông như hộp dán lên nền.
 function bakeBaseShade(geometry, floor = 0.78) {
   const pos = geometry.attributes.position;
   const shades = new Float32Array(pos.count * 3);
   for (let i = 0; i < pos.count; i += 1) {
+    // Hộp đơn vị chạy từ y = -0.5 tới 0.5; chỉ 45% phía dưới bị tối dần.
     const t = Math.min(1, Math.max(0, (pos.getY(i) + 0.5) / 0.45));
     const shade = floor + (1 - floor) * t;
     shades[i * 3] = shade;
@@ -1308,7 +1329,28 @@ function createBuildings() {
   const { uVec, vVec, uLen, vLen, rot: gridRot } = GRID_METRICS;
 
   const filledCells = new Set();
-  const blockPlates = []; // one raised sidewalk plate per city block
+  const blockPlates = []; // mỗi ô phố một tấm lát vỉa hè nhô lên
+
+  // Chiều cao nhà bốc theo phân bố lệch: đa số thấp, thi thoảng mới có một
+  // cái vọt lên. Dùng luỹ thừa thay vì random đều, vì random đều cho ra một
+  // thành phố mà nhà nào cũng cao ngang nhau, nhìn giả ngay.
+  const pickHeight = (district, tall, { bias, curve, ceiling }) => {
+    const [base, top] = district.h;
+    const span = top - base;
+    // Nhà "cao" bốc trong khoảng trên của quận; nhà thường bị luỹ thừa kéo
+    // xuống đáy và còn bị chặn trần, nên không bao giờ chạm nóc quận.
+    return tall
+      ? base + (bias + random() * (1 - bias)) * span
+      : base + random() ** curve * span * ceiling;
+  };
+  const LOT_HEIGHT = { bias: 0.55, curve: 1.7, ceiling: 0.7 };
+  const SCATTER_HEIGHT = { bias: 0.6, curve: 1.6, ceiling: 0.72 };
+
+  // Nhà ống Hà Nội: phố cổ nhồi bốn năm lô gầy trên một ô, khu phố Pháp chỉ
+  // hai ba lô rộng hơn. Cứ khoảng mười lô thì một lô để trống — sân, ngõ,
+  // hoặc nhà đã đập chưa xây lại.
+  const VACANT_ODDS = 0.09;
+
   DISTRICTS.filter((district) => !district.faded && !district.scatter).forEach((district) => {
     const [latMin, latMax, lngMin, lngMax] = district.bbox;
     for (let i = -34; i <= 26; i += 1) {
@@ -1318,100 +1360,110 @@ function createBuildings() {
         const lat = GRID.origin.lat + GRID.av.dlat * u + GRID.st.dlat * v;
         const lng = GRID.origin.lng + GRID.av.dlng * u + GRID.st.dlng * v;
         if (lat < latMin || lat > latMax || lng < lngMin || lng > lngMax) continue;
-        const key = `${i}:${j}`;
-        if (filledCells.has(key)) continue;
+
+        // Hai quận có thể chồng hộp bao lên nhau; ô nào lấp rồi thì thôi,
+        // không dựng đè lần hai.
+        const cell = `${i}:${j}`;
+        if (filledCells.has(cell)) continue;
         if (!buildingAllowed(lat, lng)) continue;
-        filledCells.add(key);
+        filledCells.add(cell);
+
         const center = project(lat, lng);
         blockPlates.push({ x: center.x, z: center.z });
-        // Tube-house Hanoi: the Old Quarter packs 4-5 skinny lots per block,
-        // the French quarter 2-3 wider ones; a few stay vacant.
+
         const lots = district.slim ? 4 + (random() < 0.5 ? 1 : 0) : random() < 0.3 ? 3 : 2;
         for (let slot = 0; slot < lots; slot += 1) {
-          if (random() < 0.09) continue;
+          if (random() < VACANT_ODDS) continue;
           const tall = random() < district.tall;
-          const base = district.h[0];
-          const span = district.h[1] - district.h[0];
-          // Bias toward shorter buildings; only "tall" picks reach the top.
-          const h = tall ? base + (0.55 + random() * 0.45) * span : base + Math.pow(random(), 1.7) * span * 0.7;
-          const slotT = (slot + 0.5) / lots - 0.5;
+          // Chia đều mặt tiền cho từng lô dọc cạnh dài của ô phố, rồi xê
+          // dịch chút theo chiều sâu cho hàng nhà không thẳng băng.
+          const alongFront = (slot + 0.5) / lots - 0.5;
           const p = center
             .clone()
-            .addScaledVector(vVec, slotT * 0.8)
+            .addScaledVector(vVec, alongFront * 0.8)
             .addScaledVector(uVec, (random() - 0.5) * 0.08);
           const grow = tall ? 1.12 : 1;
-          const w = Math.min(vLen * 0.42, ((vLen * 0.78) / lots) * (0.68 + random() * 0.24) * grow);
-          const d = uLen * (0.5 + random() * 0.15) * grow;
-          instances.push({ x: p.x, z: p.z, h, w, d, rot: gridRot, shade: random(), roof: random(), faded: false });
+          instances.push({
+            x: p.x,
+            z: p.z,
+            h: pickHeight(district, tall, LOT_HEIGHT),
+            w: Math.min(vLen * 0.42, ((vLen * 0.78) / lots) * (0.68 + random() * 0.24) * grow),
+            d: uLen * (0.5 + random() * 0.15) * grow,
+            rot: gridRot,
+            shade: random(),
+            roof: random(),
+            faded: false,
+          });
         }
       }
     }
   });
 
-  // Beyond the grid, each district scatters solid buildings that share one
-  // street orientation (with a whisper of jitter) and never interpenetrate.
-  // Districts across the river are the same, but render as faded ghosts.
+  // Ra ngoài vùng có lưới phố thì rải nhà tự do: cùng một hướng phố, xê dịch
+  // nhẹ, và không được chồng lên nhau. Bên kia sông cũng vậy nhưng dựng thành
+  // khối mờ. `guard` chặn vòng lặp chạy mãi khi quận gần như hết chỗ trống.
   DISTRICTS.filter((district) => district.faded || district.scatter).forEach((district) => {
     const [latMin, latMax, lngMin, lngMax] = district.bbox;
-    const placedSpots = [];
-    let count = 0;
-    let guard = 0;
-    const cap = district.count * 16;
-    while (count < district.count && guard < cap) {
-      guard += 1;
+    const taken = [];
+    const clashes = (x, z, r) =>
+      taken.some((q) => (q.x - x) ** 2 + (q.z - z) ** 2 < ((q.r + r) * (q.r + r)) * 0.62);
+
+    let placed = 0;
+    for (let guard = 0; placed < district.count && guard < district.count * 16; guard += 1) {
       const lat = latMin + random() * (latMax - latMin);
       const lng = lngMin + random() * (lngMax - lngMin);
       if (!buildingAllowed(lat, lng)) continue;
+
       const p = project(lat, lng);
       const w = 0.3 + random() * 0.55;
       const d = 0.3 + random() * 0.6;
-      const r = Math.max(w, d) * 0.72;
-      if (
-        placedSpots.some(
-          (q) => (q.x - p.x) * (q.x - p.x) + (q.z - p.z) * (q.z - p.z) < (q.r + r) * (q.r + r) * 0.62,
-        )
-      )
-        continue;
-      placedSpots.push({ x: p.x, z: p.z, r });
+      const radius = Math.max(w, d) * 0.72;
+      if (clashes(p.x, p.z, radius)) continue;
+      taken.push({ x: p.x, z: p.z, r: radius });
+
       const tall = random() < (district.tall ?? 0);
-      const base = district.h[0];
-      const span = district.h[1] - district.h[0];
-      const h = tall ? base + (0.6 + random() * 0.4) * span : base + Math.pow(random(), 1.6) * span * 0.72;
+      const grow = tall ? 1.15 : 1;
       instances.push({
         x: p.x,
         z: p.z,
-        h,
-        w: tall ? w * 1.15 : w,
-        d: tall ? d * 1.15 : d,
+        h: pickHeight(district, tall, SCATTER_HEIGHT),
+        w: w * grow,
+        d: d * grow,
         rot: gridRot + (district.rot ?? 0) + (random() - 0.5) * 0.1,
         shade: random(),
         roof: random(),
         faded: Boolean(district.faded),
       });
-      count += 1;
+      placed += 1;
     }
   });
 
-  // Faded outer-borough buildings render as flat, pale "ghost" blocks.
+  // Nhà ở rìa bản đồ dựng thành khối "mờ": phẳng, nhạt, không cửa sổ không
+  // mái. Mắt hiểu ngay đó là thành phố tiếp diễn ra xa chứ không phải chỗ
+  // bản đồ hết, mà chi phí gần như bằng không.
   const fadedBoxes = instances.filter((b) => b.faded);
   const solidBoxes = instances.filter((b) => !b.faded);
   if (fadedBoxes.length) {
-    const ghostGeo = bakeBaseShade(new THREE.BoxGeometry(1, 1, 1), 0.88);
-    // Clone: landmark blocks reuse these materials with plain geometry, and
-    // vertexColors on a geometry without a color attribute renders black.
+    // Nhân bản vật liệu chứ không dùng chung: các khối mốc kiến trúc cũng
+    // xài materials.ghost nhưng với hình học không có thuộc tính màu đỉnh,
+    // mà bật vertexColors lên hình học như thế thì nó ra đen sì.
     const ghostMaterial = materials.ghost.clone();
     ghostMaterial.vertexColors = true;
-    const ghostMesh = new THREE.InstancedMesh(ghostGeo, ghostMaterial, fadedBoxes.length);
-    const m = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    const s = new THREE.Vector3();
-    const pp = new THREE.Vector3();
+    const ghostMesh = new THREE.InstancedMesh(
+      bakeBaseShade(new THREE.BoxGeometry(1, 1, 1), 0.88),
+      ghostMaterial,
+      fadedBoxes.length,
+    );
+    const matrix = new THREE.Matrix4();
+    const quat = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    const pos = new THREE.Vector3();
     fadedBoxes.forEach((box, i) => {
-      pp.set(box.x, box.h / 2, box.z);
-      q.setFromAxisAngle(UP, box.rot);
-      s.set(box.w, box.h, box.d);
-      m.compose(pp, q, s);
-      ghostMesh.setMatrixAt(i, m);
+      pos.set(box.x, box.h / 2, box.z);
+      quat.setFromAxisAngle(UP, box.rot);
+      scale.set(box.w, box.h, box.d);
+      matrix.compose(pos, quat, scale);
+      ghostMesh.setMatrixAt(i, matrix);
     });
     ghostMesh.renderOrder = 1;
     scene.add(ghostMesh);
@@ -1690,7 +1742,8 @@ function createBuildings() {
   }
 }
 
-// Helper: a tapered tower with optional setbacks. Returns top Y.
+// Xếp chồng các tầng khối để thành một toà tháp thu dần. Trả về cao độ đỉnh
+// để chỗ gọi còn biết đặt chóp, ăng-ten hay nhãn tên lên đâu.
 function stackTower(lat, lng, levels, material, rotation = 0) {
   const p = project(lat, lng);
   let y = 0;
@@ -2432,60 +2485,63 @@ function createBikeMesh(bodyColor, helmetColor = 0xf4f1e8) {
   return group;
 }
 
+// Xe buýt Hà Nội: thân vàng kem, dải đỏ chạy dọc — bộ nhận diện của
+// Transerco, nhìn thoáng qua là biết ngay xe buýt chứ không phải xe tải.
 function createBusMesh() {
   const group = new THREE.Group();
-  // Transerco cream-yellow with the red band.
-  const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0xf0dfa6, roughness: 0.5 });
-  const stripeMaterial = new THREE.MeshStandardMaterial({ color: 0xc03a2e, roughness: 0.45 });
-  const glassMaterial = new THREE.MeshStandardMaterial({ color: 0x9ec6d4, roughness: 0.2, transparent: true, opacity: 0.88 });
-  const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x171a1f, roughness: 0.72 });
+  const paint = new THREE.MeshStandardMaterial({ color: 0xf0dfa6, roughness: 0.5 });
+  const stripe = new THREE.MeshStandardMaterial({ color: 0xc03a2e, roughness: 0.45 });
+  const glass = new THREE.MeshStandardMaterial({
+    color: 0x9ec6d4,
+    roughness: 0.2,
+    transparent: true,
+    opacity: 0.88,
+  });
 
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.32, 1.5), bodyMaterial);
-  body.position.y = 0.26;
-  body.castShadow = true;
-  group.add(body);
-  const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.43, 0.07, 1.5), stripeMaterial);
-  stripe.position.y = 0.18;
-  group.add(stripe);
-  const windows = new THREE.Mesh(new THREE.BoxGeometry(0.43, 0.09, 1.3), glassMaterial);
-  windows.position.y = 0.34;
-  group.add(windows);
-  const wheelGeo = new THREE.CylinderGeometry(0.08, 0.08, 0.075, 12);
-  wheelGeo.rotateZ(Math.PI / 2);
-  for (const x of [-0.22, 0.22]) {
-    for (const z of [-0.52, 0.52]) {
-      const wheel = new THREE.Mesh(wheelGeo, wheelMaterial);
-      wheel.position.set(x, 0.08, z);
-      group.add(wheel);
-    }
+  for (const [w, h, d, y, material, shadow] of [
+    [0.42, 0.32, 1.5, 0.26, paint, true],
+    [0.43, 0.07, 1.5, 0.18, stripe, false],
+    [0.43, 0.09, 1.3, 0.34, glass, false],
+  ]) {
+    const part = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+    part.position.y = y;
+    part.castShadow = shadow;
+    group.add(part);
   }
+  addWheels(group, [-0.22, 0.22], [-0.52, 0.52]);
   return group;
 }
 
 function createTruckMesh(color) {
   const group = new THREE.Group();
-  const cabMaterial = new THREE.MeshStandardMaterial({ color, roughness: 0.45 });
-  const boxMaterial = new THREE.MeshStandardMaterial({ color: 0xe9e6dd, roughness: 0.6 });
-  const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x171a1f, roughness: 0.72 });
+  const cabPaint = new THREE.MeshStandardMaterial({ color, roughness: 0.45 });
+  const boxPaint = new THREE.MeshStandardMaterial({ color: 0xe9e6dd, roughness: 0.6 });
 
-  const cab = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.26, 0.34), cabMaterial);
-  cab.position.set(0, 0.21, 0.5);
-  cab.castShadow = true;
-  group.add(cab);
-  const cargo = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.4, 0.86), boxMaterial);
-  cargo.position.set(0, 0.28, -0.12);
-  cargo.castShadow = true;
-  group.add(cargo);
-  const wheelGeo = new THREE.CylinderGeometry(0.08, 0.08, 0.075, 12);
-  wheelGeo.rotateZ(Math.PI / 2);
-  for (const x of [-0.22, 0.22]) {
-    for (const z of [-0.4, 0.48]) {
-      const wheel = new THREE.Mesh(wheelGeo, wheelMaterial);
+  for (const [w, h, d, y, z, material] of [
+    [0.4, 0.26, 0.34, 0.21, 0.5, cabPaint],
+    [0.44, 0.4, 0.86, 0.28, -0.12, boxPaint],
+  ]) {
+    const part = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+    part.position.set(0, y, z);
+    part.castShadow = true;
+    group.add(part);
+  }
+  addWheels(group, [-0.22, 0.22], [-0.4, 0.48]);
+  return group;
+}
+
+// Bốn bánh đặt ở bốn góc. Hình trụ xoay 90° quanh trục Z để nằm ngang.
+function addWheels(group, xs, zs) {
+  const geometry = new THREE.CylinderGeometry(0.08, 0.08, 0.075, 12);
+  geometry.rotateZ(Math.PI / 2);
+  const rubber = new THREE.MeshStandardMaterial({ color: 0x171a1f, roughness: 0.72 });
+  for (const x of xs) {
+    for (const z of zs) {
+      const wheel = new THREE.Mesh(geometry, rubber);
       wheel.position.set(x, 0.08, z);
       group.add(wheel);
     }
   }
-  return group;
 }
 
 function pathWorldLength(path) {
@@ -2494,117 +2550,130 @@ function pathWorldLength(path) {
   return length;
 }
 
+/* ---------- Đổ xe ra đường ---------- */
+
+// Giao thông Hà Nội là một dòng xe máy, ô tô bơi lẫn trong đó. Tỉ lệ dưới
+// đây cố ý cho xe máy áp đảo: cứ ba xe thì hai là xe máy, thi thoảng mới
+// chen một cái buýt hoặc xe tải.
+const TRAFFIC_MIX = { bus: 13, truck: 17, car: 3 };
+const CAR_COLORS = [0x2fb8ac, 0xf4f1e8, 0x3c414b, 0x2fb8ac, 0xe54c42, 0x2e6cff, 0xf4f1e8, 0x30b37c, 0x2fb8ac, 0xd7b96a];
+const BIKE_COLORS = [0x30343c, 0x00b14f, 0xc03a2e, 0x2e6cff, 0x00b14f, 0x6b7280, 0xd7b96a, 0x00b14f, 0x8c3f5d, 0x394856];
+const HELMET_COLORS = [0xf4f1e8, 0x2e343c, 0xd21f24, 0x2e6cff, 0xf7b500];
+const TRUCK_COLORS = [0x8a4b3a, 0x3c5a48, 0x39424e];
+const TRAFFIC_CAP = 132;
+
+function kindOf(index) {
+  if (index % TRAFFIC_MIX.bus === 6) return "bus";
+  if (index % TRAFFIC_MIX.truck === 9) return "truck";
+  return index % TRAFFIC_MIX.car === 0 ? "car" : "bike";
+}
+
+function buildVehicleMesh(kind, index) {
+  const pick = (list) => list[index % list.length];
+  if (kind === "bus") return createBusMesh();
+  if (kind === "truck") return createTruckMesh(pick(TRUCK_COLORS));
+  if (kind === "car") return createCarMesh(pick(CAR_COLORS));
+  return createBikeMesh(pick(BIKE_COLORS), pick(HELMET_COLORS));
+}
+
 function createVehicles(roadPaths) {
-  // Hanoi traffic is a river of motorbikes with cars swimming among them.
-  // Cyan = Xanh SM electric taxis; green bikes = Grab riders.
-  const carColors = [0x2fb8ac, 0xf4f1e8, 0x3c414b, 0x2fb8ac, 0xe54c42, 0x2e6cff, 0xf4f1e8, 0x30b37c, 0x2fb8ac, 0xd7b96a];
-  const bikeColors = [0x30343c, 0x00b14f, 0xc03a2e, 0x2e6cff, 0x00b14f, 0x6b7280, 0xd7b96a, 0x00b14f, 0x8c3f5d, 0x394856];
-  const helmetColors = [0xf4f1e8, 0x2e343c, 0xd21f24, 0x2e6cff, 0xf7b500];
-  const truckColors = [0x8a4b3a, 0x3c5a48, 0x39424e];
   const random = seededRandom(700);
-  // Long boulevards get proportionally more traffic than short bridge decks.
   let built = 0;
-  roadPaths.forEach((path) => {
+  for (const path of roadPaths) {
     const length = pathWorldLength(path);
+    // Đại lộ dài thì nhiều xe hơn mặt cầu ngắn, chia theo chiều dài thật.
     const count = Math.max(1, Math.round(length / 11));
-    for (let i = 0; i < count && built < 132; i += 1) {
-      const kind =
-        built % 13 === 6 ? "bus" : built % 17 === 9 ? "truck" : built % 3 === 0 ? "car" : "bike";
-      const mesh =
-        kind === "bus"
-          ? createBusMesh()
-          : kind === "truck"
-            ? createTruckMesh(truckColors[built % truckColors.length])
-            : kind === "car"
-              ? createCarMesh(carColors[built % carColors.length])
-              : createBikeMesh(
-                  bikeColors[built % bikeColors.length],
-                  helmetColors[built % helmetColors.length],
-                );
-      // Vehicles are scaled to fit inside the street gaps between block plates.
+    for (let i = 0; i < count && built < TRAFFIC_CAP; i += 1) {
+      const kind = kindOf(built);
+      const mesh = buildVehicleMesh(kind, built);
+      // Thu nhỏ cho xe lọt vừa khe đường giữa các ô phố.
       mesh.scale.setScalar(kind === "car" ? 0.55 : kind === "bike" ? 0.62 : 0.58);
       scene.add(mesh);
       vehicleFleet.push({
         mesh,
         path,
         t: random(),
-        // Normalize by path length so world speed is consistent everywhere.
-        // Bikes weave a touch quicker than the cars.
+        // Chia cho chiều dài đường để tốc độ ngoài đời như nhau ở mọi tuyến,
+        // bất kể tuyến dài hay ngắn. Xe máy lách nhanh hơn ô tô một chút.
         speed: ((kind === "bike" ? 0.78 : 0.6) + random() * 0.5) / Math.max(4, length),
         lane: (random() - 0.5) * (kind === "bike" ? 0.14 : 0.08),
       });
       built += 1;
     }
-  });
+  }
 }
 
+// Lấy vị trí, hướng đi và pháp tuyến tại tham số t trên một đường gấp khúc.
+// Pháp tuyến để dịch xe sang làn mà không phải tính lại góc.
 function samplePath(path, t) {
   const wrapped = ((t % 1) + 1) % 1;
   const scaled = wrapped * (path.length - 1);
   const index = Math.floor(scaled);
-  const frac = scaled - index;
   const a = path[index];
   const b = path[Math.min(index + 1, path.length - 1)];
-  const point = new THREE.Vector3().lerpVectors(a, b, frac);
+  const point = new THREE.Vector3().lerpVectors(a, b, scaled - index);
   const tangent = new THREE.Vector3().subVectors(b, a).normalize();
-  const normal = new THREE.Vector3(-tangent.z, 0, tangent.x);
-  return { point, tangent, normal };
+  return { point, tangent, normal: new THREE.Vector3(-tangent.z, 0, tangent.x) };
 }
 
 function updateVehicles(delta) {
-  vehicleFleet.forEach((vehicle) => {
+  for (const vehicle of vehicleFleet) {
     vehicle.t += delta * vehicle.speed;
     const { point, tangent, normal } = samplePath(vehicle.path, vehicle.t);
     vehicle.mesh.position.copy(point).addScaledVector(normal, vehicle.lane);
-    vehicle.mesh.position.y = point.y + 0.02; // wheels on the asphalt (or the bridge deck)
+    // Nhấc lên 0.02 để bánh chạm mặt nhựa (hoặc mặt cầu) chứ không lún xuống.
+    vehicle.mesh.position.y = point.y + 0.02;
     vehicle.mesh.rotation.y = Math.atan2(tangent.x, tangent.z);
-  });
+  }
+}
+
+// Tàu, thuyền, máy bay đều chạy chung một kiểu: tiến theo tham số t, lấy
+// điểm và hướng trên tuyến, quay mũi theo hướng đó. Khác nhau chỉ ở cao độ
+// và chút nghiêng cánh của máy bay, nên gom lại một hàm.
+function advanceFleet(fleet, delta, settle) {
+  for (const unit of fleet) {
+    unit.t += delta * unit.speed;
+    const { point, tangent } = samplePath(unit.path, unit.t);
+    unit.mesh.position.copy(point);
+    unit.mesh.rotation.y = Math.atan2(tangent.x, tangent.z);
+    settle(unit, point);
+  }
 }
 
 function updateTransit(delta) {
-  subwayFleet.forEach((vehicle) => {
-    vehicle.t += delta * vehicle.speed;
-    const { point, tangent } = samplePath(vehicle.path, vehicle.t);
-    vehicle.mesh.position.copy(point);
-    vehicle.mesh.position.y = point.y + 0.09;
-    vehicle.mesh.rotation.y = Math.atan2(tangent.x, tangent.z);
+  // Tàu chạy trên ray, nhấc khỏi tim tuyến một chút.
+  advanceFleet(subwayFleet, delta, (unit, point) => {
+    unit.mesh.position.y = point.y + 0.09;
   });
-
-  ferryFleet.forEach((vehicle) => {
-    vehicle.t += delta * vehicle.speed;
-    const { point, tangent } = samplePath(vehicle.path, vehicle.t);
-    vehicle.mesh.position.copy(point);
-    vehicle.mesh.position.y = 0.16;
-    vehicle.mesh.rotation.y = Math.atan2(tangent.x, tangent.z);
+  // Thuyền luôn nổi ở mặt nước, bất kể tuyến vẽ ở cao độ nào.
+  advanceFleet(ferryFleet, delta, (unit) => {
+    unit.mesh.position.y = 0.16;
   });
-
-  planeFleet.forEach((vehicle) => {
-    vehicle.t += delta * vehicle.speed;
-    const { point, tangent } = samplePath(vehicle.path, vehicle.t);
-    vehicle.mesh.position.copy(point);
-    vehicle.mesh.rotation.y = Math.atan2(tangent.x, tangent.z);
-    vehicle.mesh.rotation.z = Math.sin(vehicle.t * Math.PI * 2) * 0.08;
+  // Máy bay giữ nguyên cao độ của tuyến, thêm cái lắc cánh nhẹ cho có sức sống.
+  advanceFleet(planeFleet, delta, (unit) => {
+    unit.mesh.rotation.z = Math.sin(unit.t * Math.PI * 2) * 0.08;
   });
 }
 
-// A dozen gulls circling the parks and the harbor: one instanced chevron
-// mesh, one draw call, a handful of matrix updates per frame.
-function createBirds() {
-  const wing = new Float32Array([
-    // left wing
-    0, 0, 0.16, -0.5, 0.12, -0.12, -0.05, 0, -0.06,
-    // right wing
-    0, 0, 0.16, 0.05, 0, -0.06, 0.5, 0.12, -0.12,
-  ]);
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.BufferAttribute(wing, 3));
-  const material = new THREE.MeshBasicMaterial({ color: 0x2b3038, side: THREE.DoubleSide });
+// Chim lượn vòng trên hồ và bãi giữa. Mỗi con chỉ là hai tam giác xếp thành
+// hình chữ V — ở độ cao đó mắt không phân biệt được gì hơn, mà cả đàn gói
+// trong một lệnh vẽ duy nhất.
+const BIRD_WING = new Float32Array([
+  0, 0, 0.16, -0.5, 0.12, -0.12, -0.05, 0, -0.06, // cánh trái
+  0, 0, 0.16, 0.05, 0, -0.06, 0.5, 0.12, -0.12, // cánh phải
+]);
 
-  const flocks = [
-    { lat: 21.058, lng: 105.82, alt: 6.4, radius: 4.8, count: 5 }, // Hồ Tây
-    { lat: 21.047, lng: 105.861, alt: 5.4, radius: 3.4, count: 4 }, // bãi giữa sông Hồng
-    { lat: 21.0287, lng: 105.8523, alt: 5.0, radius: 2.4, count: 3 }, // Hồ Gươm
-  ];
+const BIRD_FLOCKS = [
+  { lat: 21.058, lng: 105.82, alt: 6.4, radius: 4.8, count: 5 }, // Hồ Tây
+  { lat: 21.047, lng: 105.861, alt: 5.4, radius: 3.4, count: 4 }, // bãi giữa sông Hồng
+  { lat: 21.0287, lng: 105.8523, alt: 5.0, radius: 2.4, count: 3 }, // Hồ Gươm
+];
+
+function createBirds() {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(BIRD_WING, 3));
+  const material = new THREE.MeshBasicMaterial({ color: 0x2b3038, side: THREE.DoubleSide });
+  const flocks = BIRD_FLOCKS;
   const random = seededRandom(77);
   for (const flock of flocks) {
     const center = project(flock.lat, flock.lng, flock.alt);
@@ -2879,139 +2948,159 @@ function createLabels() {
 
 }
 
-function updateLabels() {
-  const width = window.innerWidth;
-  const height = window.innerHeight;
-  const activeItems = new Set(visibleItems(state.activeAreaId).map((item) => item.id));
-  const activeArea = state.activeAreaId;
-  const keyNames = new Set([
-    "Hồ Gươm & Tháp Rùa",
-    "Lăng Chủ tịch Hồ Chí Minh",
-    "Văn Miếu – Quốc Tử Giám",
-    "Chùa Trấn Quốc",
-    "Cầu Long Biên",
-    "Phở Bát Đàn",
-    "Bún chả Hương Liên",
-    "Cà phê Giảng",
-    "Bia hơi Tạ Hiện",
-    "Chợ Đồng Xuân",
-    "Keangnam Landmark 72",
-    "Lotte Center Hà Nội",
-    "Vinhomes Times City",
-    "Vinhomes Royal City",
-    "SVĐ Quốc gia Mỹ Đình",
-  ]);
+// Những cái tên mà người ta mở bản đồ Hà Nội là tìm. Trên điện thoại chỉ
+// hiện chừng này nhãn, còn lại giấu đi cho đỡ rối.
+const KEY_PLACES = new Set([
+  "Hồ Gươm & Tháp Rùa",
+  "Lăng Chủ tịch Hồ Chí Minh",
+  "Văn Miếu – Quốc Tử Giám",
+  "Chùa Trấn Quốc",
+  "Cầu Long Biên",
+  "Phở Bát Đàn",
+  "Bún chả Hương Liên",
+  "Cà phê Giảng",
+  "Bia hơi Tạ Hiện",
+  "Chợ Đồng Xuân",
+  "Keangnam Landmark 72",
+  "Lotte Center Hà Nội",
+  "Vinhomes Times City",
+  "Vinhomes Royal City",
+  "SVĐ Quốc gia Mỹ Đình",
+]);
 
-  // Phase 1: figure out which labels are visible and where their pins land.
+// Nới rộng khung một chút (1.08 thay vì 1.0) để nhãn ở sát mép không bị tắt
+// đột ngột ngay khi vừa chạm rìa màn hình.
+const SCREEN_MARGIN = 1.08;
+
+function onScreen(projected) {
+  return (
+    projected.z > -1 &&
+    projected.z < 1 &&
+    Math.abs(projected.x) < SCREEN_MARGIN &&
+    Math.abs(projected.y) < SCREEN_MARGIN
+  );
+}
+
+// Ghim toạ độ ngang vào trong khung, chừa nửa bề rộng nhãn ở mỗi bên.
+function clampX(x, halfWidth, width) {
+  const limit = Math.max(halfWidth, width - halfWidth);
+  return Math.min(Math.max(x, halfWidth), limit);
+}
+
+// Dồn nhãn: chia hai lượt. Lượt một xem nhãn nào đáng hiện và pin của nó rơi
+// vào đâu trên màn hình. Lượt hai xếp chỗ theo kiểu tham lam — nhãn quan
+// trọng đặt trước, nhãn đặt sau mà đụng nhau thì bị đẩy thẳng lên trên, kéo
+// theo một sợi chỉ nối ngược xuống pin của nó.
+const DECLUTTER = { pad: 3, step: 5, maxShift: 150 };
+
+function collectLabelCandidates(width, height) {
+  const activeArea = state.activeAreaId;
+  const activeItems = new Set(visibleItems(activeArea).map((item) => item.id));
   const candidates = [];
-  STARTUPS.forEach((startup) => {
+
+  for (const startup of STARTUPS) {
     const marker = startupMarkers.get(startup.id);
     const label = labelElements.get(startup.id);
-    if (!marker || !label) return;
+    if (!marker || !label) continue;
+
     const world = marker.group.position.clone();
-    world.y += 1.55;
+    world.y += 1.55; // nhô lên khỏi đầu pin
     const projected = world.project(camera);
-    const visibleOnScreen =
-      projected.z > -1 &&
-      projected.z < 1 &&
-      projected.x > -1.08 &&
-      projected.x < 1.08 &&
-      projected.y > -1.08 &&
-      projected.y < 1.08;
+
     const inArea = stageAllowed(startup) && (activeArea === "all" || activeItems.has(startup.id));
-    const isKey = keyNames.has(startup.name);
-    const showByMode = state.labelsMode === "all" ? inArea : inArea && (isKey || state.selectedId === startup.id);
+    const isKey = KEY_PLACES.has(startup.name);
     const selected = state.selectedId === startup.id;
+    const byMode = state.labelsMode === "all" ? inArea : inArea && (isKey || selected);
 
     label.classList.toggle("is-muted", activeArea !== "all" && !activeItems.has(startup.id));
     label.classList.toggle("is-dimmed", Boolean(state.selectedId) && !selected);
     label.classList.toggle("is-selected", selected);
 
-    const show = visibleOnScreen && showByMode;
-    if (!show) {
+    if (!onScreen(projected) || !byMode) {
       label.classList.add("is-hidden");
       label.classList.remove("has-leader");
-      return;
+      continue;
     }
 
-    const ay = (-projected.y * 0.5 + 0.5) * height;
-    let w = labelDims.get(startup.id)?.w;
-    let h = labelDims.get(startup.id)?.h;
-    if (!w) {
-      w = label.offsetWidth || 120;
-      h = label.offsetHeight || 28;
-      labelDims.set(startup.id, { w, h });
+    // Đo kích thước một lần rồi nhớ lại: đọc offsetWidth mỗi khung hình là
+    // ép trình duyệt tính lại bố cục, tụt khung hình thấy rõ.
+    let dims = labelDims.get(startup.id);
+    if (!dims?.w) {
+      dims = { w: label.offsetWidth || 120, h: label.offsetHeight || 28 };
+      labelDims.set(startup.id, dims);
     }
-    // Giữ nhãn nằm trọn trong khung trước khi dồn chỗ, nếu không nhãn dài sẽ
-    // bị cắt mất một nửa ở rìa màn hình điện thoại.
-    const margin = w / 2 + 6;
-    const ax = Math.min(Math.max((projected.x * 0.5 + 0.5) * width, margin), Math.max(margin, width - margin));
+
     candidates.push({
       label,
-      ax,
-      ay,
-      w,
-      h,
+      ax: clampX((projected.x * 0.5 + 0.5) * width, dims.w / 2 + 6, width),
+      ay: (-projected.y * 0.5 + 0.5) * height,
+      w: dims.w,
+      h: dims.h,
       depth: projected.z,
       priority: selected ? 3 : isKey ? 2 : 1,
     });
-  });
+  }
+  return candidates;
+}
 
-  // Phase 2: greedy declutter. Higher priority places first; later labels that
-  // collide get pushed straight up, with a leader line back down to their pin.
+function placeLabels(candidates) {
+  const { pad, step, maxShift } = DECLUTTER;
+  // Quan trọng trước, rồi tới nhãn nằm cao hơn trên màn hình.
   candidates.sort((a, b) => b.priority - a.priority || a.ay - b.ay);
+
   const placed = [];
-  const PAD = 3;
-  const STEP = 5;
-  const MAX_SHIFT = 150;
-  candidates.forEach((c) => {
-    let shift = 0;
-    const rectAt = (s) => ({
-      left: c.ax - c.w / 2 - PAD,
-      right: c.ax + c.w / 2 + PAD,
-      top: c.ay - s - 1.1 * c.h - PAD,
-      bottom: c.ay - s - 0.1 * c.h + PAD,
+  const overlaps = (r) =>
+    placed.some((p) => r.left < p.right && r.right > p.left && r.top < p.bottom && r.bottom > p.top);
+
+  for (const c of candidates) {
+    const boxAt = (shift) => ({
+      left: c.ax - c.w / 2 - pad,
+      right: c.ax + c.w / 2 + pad,
+      top: c.ay - shift - 1.1 * c.h - pad,
+      bottom: c.ay - shift - 0.1 * c.h + pad,
     });
-    const hits = (r) =>
-      placed.some(
-        (p) => r.left < p.right && r.right > p.left && r.top < p.bottom && r.bottom > p.top,
-      );
-    let rect = rectAt(shift);
-    while (hits(rect) && shift < MAX_SHIFT) {
-      shift += STEP;
-      rect = rectAt(shift);
+
+    let shift = 0;
+    let box = boxAt(shift);
+    while (overlaps(box) && shift < maxShift) {
+      shift += step;
+      box = boxAt(shift);
     }
-    // Lowest-priority labels that still can't fit step aside (hidden) to keep it tidy.
-    if (hits(rect) && c.priority === 1) {
+
+    // Nhãn hạng bét mà đẩy hết cỡ vẫn không lọt thì thôi, ẩn đi cho gọn.
+    if (overlaps(box) && c.priority === 1) {
       c.label.classList.add("is-hidden");
       c.label.classList.remove("has-leader");
-      return;
+      continue;
     }
-    placed.push(rect);
+
+    placed.push(box);
     c.label.classList.remove("is-hidden");
     c.label.style.left = `${Math.round(c.ax)}px`;
     c.label.style.top = `${c.ay - shift}px`;
     c.label.style.setProperty("--leader", `${shift + 4}px`);
     c.label.classList.toggle("has-leader", shift > 6);
-  });
+  }
+}
 
-  landmarkLabelElements.forEach(({ el, point }) => {
-    const world = project(point.lat, point.lng, point.y);
-    const projected = world.project(camera);
-    const visibleOnScreen =
-      projected.z > -1 &&
-      projected.z < 1 &&
-      projected.x > -1.08 &&
-      projected.x < 1.08 &&
-      projected.y > -1.08 &&
-      projected.y < 1.08;
-    const show = visibleOnScreen && (state.activeAreaId === "all" || state.labelsMode === "all");
+// Nhãn nền (tên hồ, tên cầu, tên ga) không tham gia dồn chỗ — chúng nằm im
+// một chỗ, chỉ mờ đi khi ra khỏi khung hoặc khi đang lọc theo khu vực.
+function placeLandmarkLabels(width, height) {
+  const showAll = state.activeAreaId === "all" || state.labelsMode === "all";
+  for (const { el, point } of landmarkLabelElements) {
+    const projected = project(point.lat, point.lng, point.y).project(camera);
     const half = (el.offsetWidth || 80) / 2 + 6;
-    const lx = (projected.x * 0.5 + 0.5) * width;
-    el.style.left = `${Math.round(Math.min(Math.max(lx, half), Math.max(half, width - half)))}px`;
+    el.style.left = `${Math.round(clampX((projected.x * 0.5 + 0.5) * width, half, width))}px`;
     el.style.top = `${(-projected.y * 0.5 + 0.5) * height}px`;
-    el.style.opacity = show ? "1" : "0";
-  });
+    el.style.opacity = onScreen(projected) && showAll ? "1" : "0";
+  }
+}
+
+function updateLabels() {
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  placeLabels(collectLabelCandidates(width, height));
+  placeLandmarkLabels(width, height);
 }
 
 // Category chips: legend + one-tap filter. Tapping a chip shows only that
@@ -3078,7 +3167,7 @@ function updateUiState() {
   document.body.classList.toggle("is-focused", Boolean(state.selectedId));
   syncMapMarkers();
 
-  // Slide the active area's description in right below its row.
+  // Chèn dòng mô tả xuống ngay dưới đúng mục khu vực đang chọn.
   const activeButton = areaList.querySelector(`.area-button[data-area="${state.activeAreaId}"]`);
   const area = AREA_BY_ID[state.activeAreaId];
   if (activeButton && area) {
@@ -3090,7 +3179,7 @@ function updateUiState() {
 }
 
 /* ---------------------------------------------------------------- */
-/* Deep links: #/company/:id and #/area/:id, with back/forward       */
+/* Liên kết sâu: #/place/:id và #/area/:id, có lùi/tiến trình duyệt   */
 /* ---------------------------------------------------------------- */
 
 let suppressHashEvent = false;
@@ -3150,8 +3239,8 @@ function selectStartup(id) {
 }
 
 function renderAreaDetail() {
-  // The card slot shows a persistent "how to explore" guide whenever no
-  // company is selected; selecting a company swaps in its details.
+  // Chỗ của thẻ chi tiết: khi chưa chọn gì thì luôn hiện bảng hướng dẫn
+  // "cách khám phá"; chọn một địa điểm là nó nhường chỗ cho thẻ chi tiết.
   if (state.selectedId) {
     detailCard.classList.add("is-hidden");
     detailCard.classList.remove("is-onboard");
@@ -3185,7 +3274,7 @@ function renderStartupDetail(startup) {
   }
 
   const meta = [stageLabel(startup.stage), startup.office, loc].filter(Boolean).join(" · ");
-  // Optional enrichment fields; rendered only when the data actually has them.
+  // Các trường bổ sung không bắt buộc: chỉ vẽ ra khi dữ liệu thật sự có.
   const open = openState(startup.hours);
   const facts = [
     startup.price ? `${t("price")} ${startup.price}` : null,
@@ -3240,26 +3329,26 @@ function renderStartupDetail(startup) {
     });
 }
 
-// Clipboard API first, hidden-textarea execCommand as the fallback.
+// Ưu tiên Clipboard API; trình duyệt cũ hoặc trang không chạy https thì lùi
+// về mẹo textarea ẩn + execCommand.
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
     return true;
   } catch {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
+    const scratch = document.createElement("textarea");
+    scratch.value = text;
+    scratch.setAttribute("readonly", "");
+    scratch.style.cssText = "position:fixed;opacity:0";
+    document.body.appendChild(scratch);
+    scratch.select();
     let ok = false;
     try {
       ok = document.execCommand("copy");
     } catch {
       ok = false;
     }
-    ta.remove();
+    scratch.remove();
     return ok;
   }
 }
@@ -3273,91 +3362,119 @@ function clearSelection() {
   writeHash(area.id === "all" ? "#/" : `#/area/${area.id}`);
 }
 
+/* ---------- Máy quay ---------- */
+
+// Màn hình dọc chỉ thấy một lát rất hẹp của thành phố. Cách sửa hiển nhiên
+// là lùi máy ra sau, nhưng lùi không thôi thì góc nhìn bẹt ra và nửa khung
+// hình thành bầu trời. Nên vừa lùi vừa NGHIÊNG XUỐNG: giữ nguyên hướng
+// ngắm, chỉ đổi bán kính và độ cao. viewFit.pull và viewFit.tilt là hai núm
+// vặn đó, tính theo tỉ lệ khung hình.
 function cameraDestination(focus) {
   const target = project(focus.lat, focus.lng, 0.8);
   const rotation = focus.rotation ?? 0.66;
   const distance = focus.distance ?? 40;
   const height = focus.height ?? 28;
 
-  // Màn hình dọc thấy một lát rất hẹp của thành phố. Thay vì chỉ lùi camera
-  // ra sau (làm góc nhìn bẹt ra, nửa khung hình thành trời), ta vừa lùi vừa
-  // NGHIÊNG XUỐNG: giữ nguyên hướng ngắm, chỉ đổi bán kính và độ cao.
   const radius = Math.hypot(distance, height) * viewFit.pull;
   const pitch = Math.atan2(height, distance) + viewFit.tilt;
   const flat = Math.cos(pitch) * radius;
 
-  const position = new THREE.Vector3(
-    target.x + Math.sin(rotation) * flat,
-    Math.sin(pitch) * radius,
-    target.z + Math.cos(rotation) * flat,
-  );
-  return { target, position };
+  return {
+    target,
+    position: new THREE.Vector3(
+      target.x + Math.sin(rotation) * flat,
+      Math.sin(pitch) * radius,
+      target.z + Math.cos(rotation) * flat,
+    ),
+  };
 }
+
+const FLIGHT_MS = { reduced: 120, cinematic: 1900, normal: 1300 };
 
 function flyTo(focus, { cinematic = false } = {}) {
   const destination = cameraDestination(focus);
   const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const flight = {
     startTime: performance.now(),
-    duration: reduced ? 120 : cinematic ? 1900 : 1300,
+    duration: reduced ? FLIGHT_MS.reduced : cinematic ? FLIGHT_MS.cinematic : FLIGHT_MS.normal,
     fromPos: camera.position.clone(),
     fromTarget: controls.target.clone(),
     toPos: destination.position,
     toTarget: destination.target,
   };
 
-  // Startup selections dolly along a lift -> arc -> settle curve instead of a
-  // straight lerp, so flying across the city reads like a camera move.
+  // Chọn một địa điểm thì máy không bay thẳng mà nhấc lên, vòng cung, rồi hạ
+  // xuống. Bay thẳng qua thành phố trông như tua nhanh bản đồ; vòng cung mới
+  // ra dáng một cú lia máy.
   if (cinematic && !reduced) {
     const from = flight.fromPos.clone();
     const to = flight.toPos.clone();
-    const dist = from.distanceTo(to);
-    const lift = Math.min(30, 8 + dist * 0.34);
-    const mid1 = from.clone().lerp(to, 0.28);
-    mid1.y = Math.max(from.y, to.y) + lift;
-    const mid2 = from.clone().lerp(to, 0.8);
-    mid2.y = to.y + lift * 0.42;
-    flight.path = new THREE.CatmullRomCurve3([from, mid1, mid2, to], false, "centripetal");
+    const lift = Math.min(30, 8 + from.distanceTo(to) * 0.34);
+    const rise = from.clone().lerp(to, 0.28);
+    rise.y = Math.max(from.y, to.y) + lift;
+    const fall = from.clone().lerp(to, 0.8);
+    fall.y = to.y + lift * 0.42;
+    flight.path = new THREE.CatmullRomCurve3([from, rise, fall, to], false, "centripetal");
   }
   state.flight = flight;
 }
 
 function updateFlight() {
-  if (!state.flight) return;
-  const elapsed = performance.now() - state.flight.startTime;
-  const raw = Math.min(1, elapsed / state.flight.duration);
-  const t = 1 - Math.pow(1 - raw, 3);
-  if (state.flight.path) camera.position.copy(state.flight.path.getPointAt(t));
-  else camera.position.lerpVectors(state.flight.fromPos, state.flight.toPos, t);
-  controls.target.lerpVectors(state.flight.fromTarget, state.flight.toTarget, t);
+  const flight = state.flight;
+  if (!flight) return;
+  const raw = Math.min(1, (performance.now() - flight.startTime) / flight.duration);
+  // Giảm tốc bậc ba: đi nhanh lúc đầu rồi tiến chậm dần vào đích.
+  const t = 1 - (1 - raw) ** 3;
+  if (flight.path) camera.position.copy(flight.path.getPointAt(t));
+  else camera.position.lerpVectors(flight.fromPos, flight.toPos, t);
+  controls.target.lerpVectors(flight.fromTarget, flight.toTarget, t);
   if (raw >= 1) state.flight = null;
 }
+
+// Ba trạng thái của một cái pin: đang chọn, thuộc khu vực đang xem, và nằm
+// ngoài. Bảng dưới đây gom hết vào một chỗ thay vì rải ba biểu thức ba tầng
+// ngoặc — đọc ra ngay pin nào to bao nhiêu, mờ bao nhiêu.
+const PIN_STATE = {
+  //                    có địa điểm đang chọn      không có
+  selected: { scale: 1.24, opacity: 1 },
+  active: { scale: [0.8, 0.92], opacity: [0.45, 1] },
+  faded: { scale: [0.58, 0.58], opacity: [0.18, 0.32] },
+};
 
 function updateMarkerScale(time) {
   const activeItems = new Set(visibleItems(state.activeAreaId).map((item) => item.id));
   const hasSelection = Boolean(state.selectedId);
-  startupMarkers.forEach(({ group, halo, item }) => {
+  const pickState = (selected, active) =>
+    selected ? PIN_STATE.selected : active ? PIN_STATE.active : PIN_STATE.faded;
+  const at = (value) => (Array.isArray(value) ? value[hasSelection ? 0 : 1] : value);
+
+  for (const { group, halo, item } of startupMarkers.values()) {
     group.visible = stageAllowed(item);
-    if (!group.visible) return;
-    const active = state.activeAreaId === "all" || activeItems.has(item.id);
+    if (!group.visible) continue;
+
     const selected = state.selectedId === item.id;
-    const pulse = 1 + Math.sin(time * 3.2 + item.lat) * 0.04;
-    const scale = selected ? 1.24 * pulse : active ? (hasSelection ? 0.8 : 0.92) : 0.58;
-    group.scale.setScalar(scale);
-    // With a company in focus, every other pin steps back into the haze.
-    const targetOpacity = selected ? 1 : active ? (hasSelection ? 0.45 : 1) : hasSelection ? 0.18 : 0.32;
-    group.children.forEach((child) => {
+    const active = state.activeAreaId === "all" || activeItems.has(item.id);
+    const look = pickState(selected, active);
+
+    // Pin đang chọn thở nhè nhẹ. Lệch pha theo vĩ độ để cả rừng pin không
+    // phập phồng đồng loạt như một.
+    const pulse = selected ? 1 + Math.sin(time * 3.2 + item.lat) * 0.04 : 1;
+    group.scale.setScalar(at(look.scale) * pulse);
+
+    const opacity = at(look.opacity);
+    for (const child of group.children) {
+      // Quả cầu bắt chuột phải trong suốt tuyệt đối, kể cả khi pin đang sáng.
       if (child.userData.hitArea) {
         child.material.opacity = 0;
-        return;
+        continue;
       }
       if (child.material?.opacity !== undefined) {
-        child.material.transparent = targetOpacity < 1;
-        child.material.opacity = targetOpacity;
+        child.material.transparent = opacity < 1;
+        child.material.opacity = opacity;
       }
-    });
+    }
     halo.rotation.z += 0.01;
-  });
+  }
 }
 
 function pickMarker(event) {
@@ -3378,17 +3495,21 @@ function onPointerMove(event) {
 }
 
 function onPointerDown(event) {
+  // Ghi lại pin nằm dưới ngón tay NGAY LÚC ĐẶT xuống, không phải lúc nhấc
+  // lên: kéo xoay bản đồ xong nhả tay ở chỗ khác thì vẫn phải là cùng một
+  // cử chỉ, không được biến thành cú chạm vào pin nào đó.
   pointerDown = { x: event.clientX, y: event.clientY, item: pickMarker(event) };
 }
 
-// Selection happens on release so an orbit drag never triggers it. A click on
-// a marker selects it; a click on empty map clears the current selection.
+// Ngưỡng 6px phân biệt chạm với kéo. Ngón tay người không bao giờ đứng yên
+// tuyệt đối, để 0 thì trên điện thoại gần như không chọn được gì.
+const TAP_SLOP = 6;
+
 function onPointerUp(event) {
   if (!pointerDown) return;
-  const moved = Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y);
-  const item = pointerDown.item;
+  const { x, y, item } = pointerDown;
   pointerDown = null;
-  if (moved > 6) return; // a drag, not a click
+  if (Math.hypot(event.clientX - x, event.clientY - y) > TAP_SLOP) return;
   if (item) selectStartup(item.id);
   else if (state.selectedId) clearSelection();
 }
@@ -3486,22 +3607,34 @@ function closeSearch() {
 }
 
 function bindEvents() {
+  bindViewport();
+  bindPointer();
+  bindSearch();
+  bindKeyboard();
+  bindRouting();
+}
+
+// Xoay ngang xoay dọc điện thoại là đổi hẳn lượng thành phố lọt vào khung,
+// nên phải đo lại rồi lấy khung hình mới. Chỉ bay lại khi mức thay đổi đáng
+// kể và người dùng chưa chọn địa điểm nào — kéo camera khỏi chỗ họ đang xem
+// là rất khó chịu.
+function bindViewport() {
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
-    // Rotating a phone changes how much city fits: re-fit and re-frame.
     const before = viewFit.pull;
     measureViewFit();
     if (Math.abs(before - viewFit.pull) > 0.02 && !state.selectedId) {
       flyTo((AREA_BY_ID[state.activeAreaId] || AREA_BY_ID.all).focus);
     }
   });
+}
 
+function bindPointer() {
   pinLegend.addEventListener("click", (event) => {
     const chip = event.target.closest(".pin-legend__item[data-stage]");
-    if (!chip) return;
-    toggleStage(chip.dataset.stage);
+    if (chip) toggleStage(chip.dataset.stage);
   });
 
   canvas.addEventListener("pointermove", onPointerMove);
@@ -3511,24 +3644,31 @@ function bindEvents() {
     pointerDown = null;
   });
 
-  searchTrigger.addEventListener("click", openSearch);
+  const brand = document.querySelector(".brand");
+  brand?.addEventListener("click", (event) => {
+    event.preventDefault();
+    setActiveArea("all");
+  });
+}
 
+function bindSearch() {
+  searchTrigger.addEventListener("click", openSearch);
   searchInput.addEventListener("input", () => renderSearchResults(searchInput.value));
+
   searchInput.addEventListener("keydown", (event) => {
-    if (event.key === "ArrowDown") {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
-      setSearchActive(searchActiveIndex + 1);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setSearchActive(searchActiveIndex - 1);
-    } else if (event.key === "Enter") {
-      event.preventDefault();
-      const buttons = searchResultButtons();
-      const choice = buttons[searchActiveIndex] || buttons[0];
-      if (choice) {
-        selectStartup(choice.dataset.id);
-        closeSearch();
-      }
+      setSearchActive(searchActiveIndex + (event.key === "ArrowDown" ? 1 : -1));
+      return;
+    }
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    // Chưa chọn dòng nào thì Enter lấy luôn kết quả đầu tiên.
+    const buttons = searchResultButtons();
+    const choice = buttons[searchActiveIndex] || buttons[0];
+    if (choice) {
+      selectStartup(choice.dataset.id);
+      closeSearch();
     }
   });
 
@@ -3539,21 +3679,22 @@ function bindEvents() {
     closeSearch();
   });
 
-  // Click on the backdrop (outside the content) closes the dialog.
+  // Bấm ra ngoài phần nội dung (tức là trúng lớp nền) thì đóng hộp thoại.
   searchModal.addEventListener("click", (event) => {
     if (event.target === searchModal) closeSearch();
   });
+}
 
+function bindKeyboard() {
   window.addEventListener("keydown", (event) => {
-    const isSearchShortcut = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k";
-    if (isSearchShortcut) {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
       if (searchModal.open) closeSearch();
       else openSearch();
       return;
     }
 
-    // Don't hijack typing or the open search dialog.
+    // Không cướp phím khi người ta đang gõ hoặc hộp tìm kiếm đang mở.
     if (searchModal.open) return;
     const tag = document.activeElement?.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA") return;
@@ -3563,20 +3704,14 @@ function bindEvents() {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const current = Math.max(0, AREAS.findIndex((a) => a.id === state.activeAreaId));
-      const direction = event.key === "ArrowDown" ? 1 : -1;
-      const next = (current + direction + AREAS.length) % AREAS.length;
-      setActiveArea(AREAS[next].id);
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      setActiveArea(AREAS[(current + step + AREAS.length) % AREAS.length].id);
     }
   });
+}
 
-  const brand = document.querySelector(".brand");
-  if (brand)
-    brand.addEventListener("click", (event) => {
-      event.preventDefault();
-      setActiveArea("all");
-    });
-
-  // Browser back/forward re-applies the hash route.
+function bindRouting() {
+  // Nút lùi/tiến của trình duyệt đọc lại đường dẫn băm và áp lại trạng thái.
   window.addEventListener("hashchange", () => {
     if (suppressHashEvent) {
       suppressHashEvent = false;
@@ -3584,7 +3719,6 @@ function bindEvents() {
     }
     applyHashFromLocation();
   });
-
 }
 
 function animate() {
@@ -3620,9 +3754,13 @@ function animate() {
   window.requestAnimationFrame(animate);
 }
 
-function init() {
-  measureViewFit();
-  applyLanguage({ silent: true });
+// Thứ tự dựng cảnh có ràng buộc thật, không xếp tuỳ tiện được:
+//   · createStreetTrees phải chạy trước buildTrees, vì nó chỉ xếp cây vào
+//     hàng đợi, buildTrees mới thực sự dựng hình.
+//   · createStreetNetwork trả về các tuyến đường mà createVehicles cần.
+//   · createBuildings điền tâm các ô phố, createPedestrians đi theo mép
+//     những ô đó nên phải chạy sau.
+function buildScene() {
   createLights();
   createBaseMap();
   createStreetTrees();
@@ -3633,11 +3771,18 @@ function init() {
   createPedestrians();
   createLandmarks();
   createMarkers();
+  return roadPaths;
+}
+
+function buildMovers(roadPaths) {
   createVehicles(roadPaths);
   createFerries();
   createPlanes();
   createClouds();
   createBirds();
+}
+
+function buildInterface() {
   createHaze();
   createLabels();
   renderAreaList();
@@ -3647,14 +3792,22 @@ function init() {
   bindEvents();
   mountToolbar();
   readFilterFromUrl();
-  // Label sizes are cached for the declutter pass; re-measure once the pixel font lands.
+}
+
+function init() {
+  measureViewFit();
+  applyLanguage({ silent: true });
+  buildMovers(buildScene());
+  buildInterface();
+  // Kích thước nhãn được nhớ lại cho lượt dồn chỗ. Phông tải xong là chữ đổi
+  // bề rộng, nên phải đo lại một lần nữa nếu không nhãn sẽ chồng nhau.
   if (document.fonts?.ready) document.fonts.ready.then(() => labelDims.clear());
   const initial = cameraDestination(AREA_BY_ID.all.focus);
   camera.position.copy(initial.position);
   controls.target.copy(initial.target);
   renderAreaDetail(AREA_BY_ID.all);
   updateUiState();
-  // Deep links: land directly on a shared company or area.
+  // Liên kết sâu: mở thẳng vào địa điểm hoặc khu vực có trong đường dẫn.
   if (location.hash && location.hash !== "#/") applyHashFromLocation();
   animate();
 }

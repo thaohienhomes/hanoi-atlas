@@ -13,7 +13,7 @@
   "dependencies": {
     "maplibre-gl": "^5.24.0",
     "three": "^0.178.0",
-    "vite": "^7.0.0"
+    "vite": "^7.3.7"
   },
   "pnpm": {
     "overrides": {
